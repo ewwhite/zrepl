@@ -6,8 +6,10 @@ import (
 
 	"bytes"
 	"encoding/json"
+	"github.com/pkg/errors"
 	"github.com/zrepl/zrepl/rpc"
 	"github.com/zrepl/zrepl/zfs"
+	"strings"
 )
 
 type localPullACL struct{}
@@ -74,13 +76,98 @@ func (p *Puller) buildReplMapping(remoteFilesystems []*zfs.DatasetPath) (replMap
 	return replMapping, true
 }
 
-// returns true if the receiving filesystem (local side) exists and can have child filesystems
-func (p *Puller) replFilesystem(m remoteLocalMapping, localFilesystemState map[string]zfs.FilesystemState) (localExists bool) {
+func ResolveDiff(initialReplPolicy InitialReplPolicy, diff zfs.FilesystemDiff) *DiffResolution {
 
-	p.task.Enter("repl_fs")
-	defer p.task.Finish()
-	var err error
-	remote := p.Remote
+	switch diff.Conflict {
+	case zfs.ConflictAllRight:
+
+		if initialReplPolicy != InitialReplPolicyMostRecent {
+			return &DiffResolution{
+				NeedsAction: true,
+				Error: &DiffResoltionError{
+					Problem: fmt.Sprintf("policy '%s' not implemented", initialReplPolicy),
+				},
+			}
+		}
+
+		snapsOnly := make([]zfs.FilesystemVersion, 0, len(diff.MRCAPathRight))
+		for s := range diff.MRCAPathRight {
+			if diff.MRCAPathRight[s].Type == zfs.Snapshot {
+				snapsOnly = append(snapsOnly, diff.MRCAPathRight[s])
+			}
+		}
+
+		if len(snapsOnly) < 1 {
+			return &DiffResolution{
+				NeedsAction: true,
+				Error: &DiffResoltionError{
+					Problem: "source has no remote snapshots",
+				},
+			}
+		}
+
+		version := snapsOnly[len(snapsOnly)-1]
+		return &DiffResolution{
+			NeedsAction:                  true,
+			FirstElementNeedsReplication: true,
+			PullList:                     []zfs.FilesystemVersion{version},
+		}
+
+	case zfs.ConflictIncremental:
+
+		if len(diff.IncrementalPath) < 2 {
+			return &DiffResolution{
+				NeedsAction: false,
+			}
+		}
+
+		return &DiffResolution{
+			NeedsAction:                  true,
+			FirstElementNeedsReplication: false,
+			PullList:                     diff.IncrementalPath,
+		}
+
+	case zfs.ConflictNoCommonAncestor:
+		fallthrough
+	case zfs.ConflictDiverged:
+
+		var error *DiffResoltionError
+
+		switch diff.Conflict {
+		case zfs.ConflictNoCommonAncestor:
+			error = &DiffResoltionError{
+				Problem:    "remote and local filesystem have snapshots, but no common one",
+				Resolution: "perform manual establish a common snapshot history",
+			}
+		case zfs.ConflictDiverged:
+			error = &DiffResoltionError{
+				Problem: "remote and local filesystem share a history but have diverged",
+				Resolution: "perform manual replication or delete snapshots on the receiving" +
+					"side  to establish an incremental replication parse",
+			}
+		default:
+			// must cover all cases that match in the outer switch
+			panic("implementation error")
+		}
+
+		return &DiffResolution{
+			NeedsAction: true,
+			Error:       error,
+		}
+
+	}
+
+	return &DiffResolution{
+		NeedsAction: true,
+		Error: &DiffResoltionError{
+			Problem:    "unknown conflict type",
+			Resolution: fmt.Sprintf("implement support for config type %s", diff.Conflict),
+		},
+	}
+
+}
+
+func (p *Puller) diffFilesystem(m remoteLocalMapping, localFilesystemState map[string]zfs.FilesystemState) (diff zfs.FilesystemDiff, err error) {
 
 	log := p.task.Log().
 		WithField(logMapFromField, m.Remote.ToString()).
@@ -98,8 +185,7 @@ func (p *Puller) replFilesystem(m remoteLocalMapping, localFilesystemState map[s
 		log.Debug("local filesystem exists")
 		log.Debug("requesting local filesystem versions")
 		if versions, err = zfs.ZFSListFilesystemVersions(m.Local, nil); err != nil {
-			log.WithError(err).Error("cannot get local filesystem versions")
-			return false
+			return zfs.FilesystemDiff{}, errors.Wrap(err, "cannot get local filesytem versions")
 		}
 	}
 
@@ -108,151 +194,71 @@ func (p *Puller) replFilesystem(m remoteLocalMapping, localFilesystemState map[s
 		Filesystem: m.Remote,
 	}
 	var theirVersions []zfs.FilesystemVersion
-	if err = remote.Call("FilesystemVersionsRequest", &r, &theirVersions); err != nil {
-		log.WithError(err).Error("cannot get remote filesystem versions")
-		log.Warn("stopping replication for all filesystems mapped as children of receiving filesystem")
-		return false
+	if err = p.Remote.Call("FilesystemVersionsRequest", &r, &theirVersions); err != nil {
+		return zfs.FilesystemDiff{}, errors.Wrap(err, "cannot get remote filesystem versions")
 	}
 
 	log.Debug("computing diff between remote and local filesystem versions")
-	diff := zfs.MakeFilesystemDiff(versions, theirVersions)
-	log.WithField("diff", diff).Debug("diff between local and remote filesystem")
+	diff = zfs.MakeFilesystemDiff(versions, theirVersions)
 
 	if localState.Placeholder && diff.Conflict != zfs.ConflictAllRight {
 		panic("internal inconsistency: local placeholder implies ConflictAllRight")
 	}
 
-	switch diff.Conflict {
-	case zfs.ConflictAllRight:
+	return diff, nil
 
-		log.WithField("replication_policy", p.InitialReplPolicy).Info("performing initial sync, following policy")
+}
 
-		if p.InitialReplPolicy != InitialReplPolicyMostRecent {
-			panic(fmt.Sprintf("policy '%s' not implemented", p.InitialReplPolicy))
-		}
+// returns true if the receiving filesystem (local side) exists and can have child filesystems
+func (p *Puller) replFilesystem(m remoteLocalMapping, localFilesystemState map[string]zfs.FilesystemState) (localExists bool) {
 
-		snapsOnly := make([]zfs.FilesystemVersion, 0, len(diff.MRCAPathRight))
-		for s := range diff.MRCAPathRight {
-			if diff.MRCAPathRight[s].Type == zfs.Snapshot {
-				snapsOnly = append(snapsOnly, diff.MRCAPathRight[s])
-			}
-		}
+	p.task.Enter("repl_fs")
+	defer p.task.Finish()
+	var err error
 
-		if len(snapsOnly) < 1 {
-			log.Warn("cannot perform initial sync: no remote snapshots")
-			return false
-		}
-
-		r := InitialTransferRequest{
-			Filesystem:        m.Remote,
-			FilesystemVersion: snapsOnly[len(snapsOnly)-1],
-		}
-
-		log.WithField("version", r.FilesystemVersion).Debug("requesting snapshot stream")
-
-		var stream io.Reader
-
-		if err = remote.Call("InitialTransferRequest", &r, &stream); err != nil {
-			log.WithError(err).Error("cannot request initial transfer")
-			return false
-		}
-		log.Debug("received initial transfer request response")
-
-		log.Debug("invoke zfs receive")
-		recvArgs := []string{"-u"}
-		if localState.Placeholder {
-			log.Info("receive with forced rollback to replace placeholder filesystem")
-			recvArgs = append(recvArgs, "-F")
-		}
-		progressStream := p.task.ProgressUpdater(stream)
-		if err = zfs.ZFSRecv(m.Local, progressStream, recvArgs...); err != nil {
-			log.WithError(err).Error("cannot receive stream")
-			return false
-		}
-		log.Info("finished receiving stream") // TODO rx delta
-
-		// TODO unify with recv path of ConflictIncremental
-		log.Debug("configuring properties of received filesystem")
-		props := zfs.NewZFSProperties()
-		props.Set("readonly", "on")
-		if err = zfs.ZFSSet(m.Local, props); err != nil {
-			log.WithError(err).Error("cannot set readonly property")
-		}
-
-		log.Info("finished initial transfer")
-		return true
-
-	case zfs.ConflictIncremental:
-
-		if len(diff.IncrementalPath) < 2 {
-			log.Info("remote and local are in sync")
-			return true
-		}
-
-		log.Info("following incremental path from diff")
-		for i := 0; i < len(diff.IncrementalPath)-1; i++ {
-
-			from, to := diff.IncrementalPath[i], diff.IncrementalPath[i+1]
-
-			log, _ := log.WithField(logIncFromField, from.Name).WithField(logIncToField, to.Name), 0
-
-			log.Debug("requesting incremental snapshot stream")
-			r := IncrementalTransferRequest{
-				Filesystem: m.Remote,
-				From:       from,
-				To:         to,
-			}
-			var stream io.Reader
-			if err = remote.Call("IncrementalTransferRequest", &r, &stream); err != nil {
-				log.WithError(err).Error("cannot request incremental snapshot stream")
-				return false
-			}
-
-			log.Debug("invoking zfs receive")
-			progressStream := p.task.ProgressUpdater(stream)
-			// TODO protect against malicious incremental stream
-			if err = zfs.ZFSRecv(m.Local, progressStream); err != nil {
-				log.WithError(err).Error("cannot receive stream")
-				return false
-			}
-			log.Info("finished incremental transfer") // TODO increment rx
-
-		}
-		log.Info("finished following incremental path") // TODO path rx
-		return true
-
-	case zfs.ConflictNoCommonAncestor:
-		fallthrough
-	case zfs.ConflictDiverged:
-
-		var jsonDiff bytes.Buffer
-		if err := json.NewEncoder(&jsonDiff).Encode(diff); err != nil {
-			log.WithError(err).Error("cannot JSON-encode diff")
-			return false
-		}
-
-		var problem, resolution string
-
-		switch diff.Conflict {
-		case zfs.ConflictNoCommonAncestor:
-			problem = "remote and local filesystem have snapshots, but no common one"
-			resolution = "perform manual establish a common snapshot history"
-		case zfs.ConflictDiverged:
-			problem = "remote and local filesystem share a history but have diverged"
-			resolution = "perform manual replication or delete snapshots on the receiving" +
-				"side  to establish an incremental replication parse"
-		}
-
-		log.WithField("diff", jsonDiff.String()).
-			WithField("problem", problem).
-			WithField("resolution", resolution).
-			Error("manual conflict resolution required")
-
+	diff, err := p.diffFilesystem(m, localFilesystemState)
+	if err != nil {
+		p.task.Log().WithError(err).Error("error diffing filesystems")
 		return false
+	}
+	var jsonDiff bytes.Buffer
+	if err := json.NewEncoder(&jsonDiff).Encode(diff); err != nil {
+		p.task.Log().WithError(err).Error("cannot JSON-encode diff")
+		return false
+	}
+	p.task.Log().WithField("diff", jsonDiff.String()).Debug("diff between local and remote filesystem")
 
+	resolution := ResolveDiff(p.InitialReplPolicy, diff)
+	if resolution.Error != nil {
+		p.task.Log().WithError(resolution.Error).Error("error resolving filesystem diff")
+		return false
+	}
+	resolution.ReceiveFS = m.Local
+	resolution.SourceFS = m.Remote
+	var localState zfs.FilesystemState
+	localState, localExists = localFilesystemState[m.Local.ToString()]
+	resolution.RollbackReceiveFS = localState.Placeholder
+
+	p.task.Log().Debug("pulling from remote")
+	if hadError := resolution.Pull(p.task, p.Remote); hadError {
+		// FIXME check if local filesystem exists and only abort if it doesnt
+		return localExists
+	} else {
+		localExists = true
 	}
 
-	panic("should not be reached")
+	if localExists {
+		p.task.Log().Debug("configuring properties of received filesystem")
+		props := zfs.NewZFSProperties()
+		props.Set("readonly", "on")
+		props.Set("mountpoint", "none") // TODO provide configurable mounpoint mapping
+		if err := zfs.ZFSSet(m.Local, props); err != nil {
+			p.task.Log().WithError(err).Error("cannot set zfs properties")
+		}
+	}
+
+	return localExists
+
 }
 
 func (p *Puller) Pull() {
@@ -315,9 +321,120 @@ func (p *Puller) Pull() {
 			panic("internal inconsistency: replMapping should contain mapping for any path that was not filled in by WalkTopDown()")
 		}
 
-		return p.replFilesystem(m, localFilesystemState)
+		localExists := p.replFilesystem(m, localFilesystemState)
+		if !localExists {
+			log.Warn("stopping replication for all filesystems mapped as children of receiving filesystem")
+		} else {
+			log.Debug("continuing replication with child filesystems")
+		}
+		return localExists
 	})
 
 	return
 
+}
+
+type DiffResoltionError struct {
+	Problem    string
+	Resolution string
+}
+
+func (e *DiffResoltionError) Error() string {
+	return strings.Join([]string{e.Problem, e.Resolution}, ". ")
+}
+
+type DiffResolution struct {
+	NeedsAction                  bool
+	Error                        *DiffResoltionError
+	FirstElementNeedsReplication bool
+	PullList                     []zfs.FilesystemVersion
+	SourceFS                     *zfs.DatasetPath
+	ReceiveFS                    *zfs.DatasetPath
+	RollbackReceiveFS            bool
+}
+
+func (r *DiffResolution) Pull(task *Task, remote rpc.RPCClient) (hadError bool) {
+
+	if !r.NeedsAction {
+		task.Log().Info("no action required")
+		return false
+	}
+
+	if r.PullList == nil || len(r.PullList) < 1 {
+		task.Log().Error("resolution is inconsistent: PullList nil or len(PullList) == 0 but no Error")
+		return true
+	}
+	if len(r.PullList) == 1 && !r.FirstElementNeedsReplication {
+		task.Log().Error("resolution is inconsistent: len(PullList) == 1 but FirstElementNeedsReplication=false")
+		return true
+	}
+	if len(r.PullList) > 1 && r.FirstElementNeedsReplication && len(r.PullList)%2 != 0 {
+		task.Log().Error("resolution is inconsistent: len(PullList) % 2 must be 0 if pull list contains multiple entries")
+		return true
+	}
+
+	var recvStream io.Reader
+
+	if r.FirstElementNeedsReplication {
+		task.Log().Debug("first element needs replication")
+		version := r.PullList[0]
+		task.Log().WithField("version", version).Debug("requesting snapshot stream")
+		req := InitialTransferRequest{
+			Filesystem:        r.SourceFS,
+			FilesystemVersion: version,
+		}
+		if err := remote.Call("InitialTransferRequest", &req, &recvStream); err != nil {
+			task.Log().WithError(err).Error("cannot request initial transfer")
+			return true
+		}
+		task.Log().Debug("received initial transfer request response")
+		if hadError = r.recv(task, recvStream); hadError {
+			return hadError
+		}
+	}
+
+	task.Log().Debug("follow PushList")
+	for i := 0; i < len(r.PullList)-1; i++ {
+		task.Log().Debug("requesting incremental snapshot stream")
+		// safe because we asserted len(r.PullList) % 2 == 0
+		from, to := r.PullList[i], r.PullList[i+1]
+		req := IncrementalTransferRequest{
+			Filesystem: r.SourceFS,
+			From:       from,
+			To:         to,
+		}
+		if err := remote.Call("IncrementalTransferRequest", &req, &recvStream); err != nil {
+			task.Log().WithError(err).Error("cannot request incremental snapshot stream")
+			hadError = true
+			break
+		}
+		task.Log().Debug("received incremental transfer request response")
+		hadError = r.recv(task, recvStream)
+		if hadError {
+			break
+		}
+	}
+
+	return hadError
+
+}
+
+func (r *DiffResolution) recv(task *Task, recvStream io.Reader) (hadError bool) {
+	task.Enter("recv")
+	defer task.Finish()
+
+	progressStream := task.ProgressUpdater(recvStream)
+
+	// always receive without mounting, since this could corrupt the receiving mountpoint hierechy
+	recvArgs := []string{"-u"}
+	if r.RollbackReceiveFS {
+		task.Log().Info("receive with forced rollback to replace placeholder filesystem")
+		recvArgs = append(recvArgs, "-F")
+	}
+
+	if err := zfs.ZFSRecv(r.ReceiveFS, progressStream, recvArgs...); err != nil {
+		task.Log().WithError(err).Error("cannot receive stream")
+		return true
+	}
+	return false
 }
