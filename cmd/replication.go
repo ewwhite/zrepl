@@ -241,8 +241,13 @@ func (p *Puller) replFilesystem(m remoteLocalMapping, localFilesystemState map[s
 
 	p.task.Log().Debug("pulling from remote")
 	if hadError := resolution.Pull(p.task, p.Remote); hadError {
-		// FIXME check if local filesystem exists and only abort if it doesnt
-		return localExists
+		exists, err := zfs.ZFSDatasetExists(m.Local.ToString())
+		if err != nil {
+			p.task.Log().WithError(err).Error("cannot determine if pulled filesystem exists")
+			p.task.Log().Warn("not setting properties, make sure they are ok")
+			return false
+		}
+		localExists = exists
 	} else {
 		localExists = true
 	}
