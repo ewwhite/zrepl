@@ -290,6 +290,28 @@ func ZFSSet(fs *DatasetPath, props *ZFSProperties) (err error) {
 	return
 }
 
+func ZFSDatasetExists(dataset string) (exists bool, err error) {
+	cmd := exec.Command(ZFS_BINARY, "get", "all", dataset)
+
+	stderr := bytes.NewBuffer(make([]byte, 0, 1024))
+	cmd.Stderr = stderr
+
+	if err = cmd.Start(); err != nil {
+		return false, err
+	}
+
+	if err = cmd.Wait(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return exitErr.Success(), nil /// should always be exists=false
+		}
+		return false, ZFSError{
+			Stderr:  stderr.Bytes(),
+			WaitErr: err,
+		}
+	}
+	return true, nil
+}
+
 func ZFSDestroy(dataset string) (err error) {
 
 	cmd := exec.Command(ZFS_BINARY, "destroy", dataset)
