@@ -32,6 +32,11 @@ type IncrementalTransferRequest struct {
 	To         zfs.FilesystemVersion
 }
 
+type RecvRequest struct {
+	Filesystem *zfs.DatasetPath
+	Stream     io.Reader
+}
+
 type Handler struct {
 	logger Logger
 	dsf    zfs.DatasetFilter
@@ -150,6 +155,17 @@ func (h Handler) HandleIncrementalTransferRequest(r *IncrementalTransferRequest,
 
 	*stream = s
 	return
+
+}
+
+func (h Handler) HandleRecvRequest(r *RecvRequest, c *struct{}) {
+
+	log := h.logger.WithField("endpoint", "RecvRequest")
+	log.WithField("request", r).Debug("request")
+
+	// TODO map r.Filesystem to local path
+
+	zfs.ZFSRecv()
 
 }
 

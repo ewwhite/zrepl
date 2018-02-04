@@ -339,6 +339,54 @@ func (p *Puller) Pull() {
 
 }
 
+type Pusher struct {
+	remote            rpc.RPCClient
+	fsFilter          zfs.DatasetFilter
+	versionFilter     zfs.FilesystemVersionFilter
+	initialReplPolicy InitialReplPolicy
+}
+
+func (p *Pusher) Push(task *Task) {
+	task.Enter("push")
+	defer task.Finish()
+
+	localFSs, err := zfs.ZFSListMapping(p.fsFilter)
+	if err != nil {
+		task.Log().WithError(err).Error("cannot get local filesystems")
+		return
+	}
+
+	for _, fs := range localFSs {
+		p.pushFilesystem(task, fs)
+	}
+}
+
+func (p *Pusher) pushFilesystem(task *Task, path *zfs.DatasetPath) {
+	task.Enter("fs")
+	defer task.Finish()
+
+	task.Log().WithField("fs", path.ToString()).Debug("pushing filesystem")
+
+	ourVersions, err := zfs.ZFSListFilesystemVersions(path, p.versionFilter)
+	if err != nil {
+		task.Log().WithError(err).Error("cannot get local filesystem versions")
+		return
+	}
+
+	var remoteVersions []zfs.FilesystemVersion
+	req := FilesystemVersionsRequest{path}
+	if err := p.remote.Call("FilesystemVersionsRequest", &req, &remoteVersions); err != nil {
+		task.Log().WithError(err).Error("cannot get remote filesystem versions")
+		return
+	}
+
+	diff := zfs.MakeFilesystemDiff(remoteVersions, ourVersions)
+
+	resolution := ResolveDiff(p.initialReplPolicy, diff)
+
+	resolution.Push(task, p.remote)
+}
+
 type DiffResoltionError struct {
 	Problem    string
 	Resolution string
@@ -358,13 +406,7 @@ type DiffResolution struct {
 	RollbackReceiveFS            bool
 }
 
-func (r *DiffResolution) Pull(task *Task, remote rpc.RPCClient) (hadError bool) {
-
-	if !r.NeedsAction {
-		task.Log().Info("no action required")
-		return false
-	}
-
+func (r *DiffResolution) consistencyCheck(task *Task) (hadError bool) {
 	if r.PullList == nil || len(r.PullList) < 1 {
 		task.Log().Error("resolution is inconsistent: PullList nil or len(PullList) == 0 but no Error")
 		return true
@@ -375,6 +417,19 @@ func (r *DiffResolution) Pull(task *Task, remote rpc.RPCClient) (hadError bool) 
 	}
 	if len(r.PullList) > 1 && r.FirstElementNeedsReplication && len(r.PullList)%2 != 0 {
 		task.Log().Error("resolution is inconsistent: len(PullList) % 2 must be 0 if pull list contains multiple entries")
+		return true
+	}
+	return false
+}
+
+func (r *DiffResolution) Pull(task *Task, remote rpc.RPCClient) (hadError bool) {
+
+	if !r.NeedsAction {
+		task.Log().Info("no action required")
+		return false
+	}
+
+	if r.consistencyCheck(task) {
 		return true
 	}
 
@@ -442,4 +497,62 @@ func (r *DiffResolution) recv(task *Task, recvStream io.Reader) (hadError bool) 
 		return true
 	}
 	return false
+}
+
+func (r *DiffResolution) Push(task *Task, remote rpc.RPCClient) {
+
+	if !r.NeedsAction {
+		return
+	}
+
+	if r.consistencyCheck(task) {
+		return
+	}
+
+	if r.FirstElementNeedsReplication {
+		task.Log().Debug("first element needs replication")
+		version := r.PullList[0]
+
+		sendStream, err := zfs.ZFSSend(r.SourceFS, &version, nil)
+		if err != nil {
+			task.Log().WithError(err).Error("cannot zfs send")
+			return
+		}
+
+		task.Log().WithField("version", version).Debug("requesting recv")
+		req := RecvRequest{
+			Filesystem: r.SourceFS, // remote must map Source to their RecvFS
+			Stream:     sendStream,
+		}
+		var confirmation struct{}
+		if err := remote.Call("RecvRequest", &req, &confirmation); err != nil {
+			task.Log().WithError(err).Error("error requesting recv")
+			return
+		}
+
+	}
+
+	task.Log().Debug("follow PullList")
+	for i := 0; i < len(r.PullList)-1; i++ {
+
+		// safe because we asserted len(r.PullList) % 2 == 0
+		from, to := r.PullList[i], r.PullList[i+1]
+
+		sendStream, err := zfs.ZFSSend(r.SourceFS, &from, &to)
+		if err != nil {
+			task.Log().WithError(err).Error("cannot zfs send incremental")
+			return
+		}
+		req := RecvRequest{
+			Filesystem: r.SourceFS, // remote must map Source to their RecvFS
+			Stream:     sendStream,
+		}
+		var confirmation struct{}
+		if err := remote.Call("RecvRequest", &req, &confirmation); err != nil {
+			task.Log().WithError(err).Error("error requesting recv")
+			break
+		}
+
+	}
+
 }
