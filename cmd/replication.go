@@ -29,9 +29,60 @@ const (
 
 type Puller struct {
 	task              *Task
-	Remote            rpc.RPCClient
+	Remote            pullerRemote
 	Mapping           DatasetMapping
 	InitialReplPolicy InitialReplPolicy
+}
+
+func (p *Puller) Receive(sourcePath *zfs.DatasetPath, sendStream io.Reader, rollback bool) error {
+
+	recvFS, err := p.Mapping.Map(sourcePath)
+	if err != nil {
+		p.task.Log().WithField("source", sourcePath.ToString()).WithError(err).Error("cannot map source path")
+		return err
+	}
+
+	progressStream := p.task.ProgressUpdater(sendStream)
+
+	// always receive without mounting, since this could corrupt the receiving mountpoint hierechy
+	recvArgs := []string{"-u"}
+	if rollback {
+		p.task.Log().Info("receive with forced rollback to replace placeholder filesystem")
+		recvArgs = append(recvArgs, "-F")
+	}
+
+	if err := zfs.ZFSRecv(recvFS, progressStream, recvArgs...); err != nil {
+		p.task.Log().WithError(err).Error("cannot receive stream")
+		return err
+	}
+	return nil
+}
+
+type pullerRemote struct {
+	rpc.RPCClient
+}
+
+func (r pullerRemote) Send(sourcePath *zfs.DatasetPath, from, to *zfs.FilesystemVersion) (io.Reader, error) {
+	var stream io.Reader
+	if to == nil {
+		req := InitialTransferRequest{
+			Filesystem:        sourcePath,
+			FilesystemVersion: *from,
+		}
+		if err := r.Call("InitialTransferRequest", &req, &stream); err != nil {
+			return nil, err
+		}
+	} else {
+		req := IncrementalTransferRequest{
+			Filesystem: sourcePath,
+			From:       *from,
+			To:         *to,
+		}
+		if err := r.Call("IncrementalTransferRequest", &req, &stream); err != nil {
+			return nil, err
+		}
+	}
+	return stream, nil
 }
 
 type remoteLocalMapping struct {
@@ -233,14 +284,12 @@ func (p *Puller) replFilesystem(m remoteLocalMapping, localFilesystemState map[s
 		p.task.Log().WithError(resolution.Error).Error("error resolving filesystem diff")
 		return false
 	}
-	resolution.ReceiveFS = m.Local
-	resolution.SourceFS = m.Remote
 	var localState zfs.FilesystemState
 	localState, localExists = localFilesystemState[m.Local.ToString()]
 	resolution.RollbackReceiveFS = localState.Placeholder
 
 	p.task.Log().Debug("pulling from remote")
-	if hadError := resolution.Pull(p.task, p.Remote); hadError {
+	if hadError := resolution.Resolve(p.task, p, p.Remote, m.Remote); hadError {
 		exists, err := zfs.ZFSDatasetExists(m.Local.ToString())
 		if err != nil {
 			p.task.Log().WithError(err).Error("cannot determine if pulled filesystem exists")
@@ -339,54 +388,6 @@ func (p *Puller) Pull() {
 
 }
 
-type Pusher struct {
-	remote            rpc.RPCClient
-	fsFilter          zfs.DatasetFilter
-	versionFilter     zfs.FilesystemVersionFilter
-	initialReplPolicy InitialReplPolicy
-}
-
-func (p *Pusher) Push(task *Task) {
-	task.Enter("push")
-	defer task.Finish()
-
-	localFSs, err := zfs.ZFSListMapping(p.fsFilter)
-	if err != nil {
-		task.Log().WithError(err).Error("cannot get local filesystems")
-		return
-	}
-
-	for _, fs := range localFSs {
-		p.pushFilesystem(task, fs)
-	}
-}
-
-func (p *Pusher) pushFilesystem(task *Task, path *zfs.DatasetPath) {
-	task.Enter("fs")
-	defer task.Finish()
-
-	task.Log().WithField("fs", path.ToString()).Debug("pushing filesystem")
-
-	ourVersions, err := zfs.ZFSListFilesystemVersions(path, p.versionFilter)
-	if err != nil {
-		task.Log().WithError(err).Error("cannot get local filesystem versions")
-		return
-	}
-
-	var remoteVersions []zfs.FilesystemVersion
-	req := FilesystemVersionsRequest{path}
-	if err := p.remote.Call("FilesystemVersionsRequest", &req, &remoteVersions); err != nil {
-		task.Log().WithError(err).Error("cannot get remote filesystem versions")
-		return
-	}
-
-	diff := zfs.MakeFilesystemDiff(remoteVersions, ourVersions)
-
-	resolution := ResolveDiff(p.initialReplPolicy, diff)
-
-	resolution.Push(task, p.remote)
-}
-
 type DiffResoltionError struct {
 	Problem    string
 	Resolution string
@@ -401,8 +402,6 @@ type DiffResolution struct {
 	Error                        *DiffResoltionError
 	FirstElementNeedsReplication bool
 	PullList                     []zfs.FilesystemVersion
-	SourceFS                     *zfs.DatasetPath
-	ReceiveFS                    *zfs.DatasetPath
 	RollbackReceiveFS            bool
 }
 
@@ -422,10 +421,16 @@ func (r *DiffResolution) consistencyCheck(task *Task) (hadError bool) {
 	return false
 }
 
-func (r *DiffResolution) Pull(task *Task, remote rpc.RPCClient) (hadError bool) {
+type Receiver interface {
+	Receive(sourcePath *zfs.DatasetPath, sendStream io.Reader, rollback bool) error
+}
+type Sender interface {
+	Send(sourcePath *zfs.DatasetPath, from, to *zfs.FilesystemVersion) (io.Reader, error)
+}
+
+func (r *DiffResolution) Resolve(task *Task, receiver Receiver, sender Sender, sourceFS *zfs.DatasetPath) (hadError bool) {
 
 	if !r.NeedsAction {
-		task.Log().Info("no action required")
 		return false
 	}
 
@@ -433,126 +438,46 @@ func (r *DiffResolution) Pull(task *Task, remote rpc.RPCClient) (hadError bool) 
 		return true
 	}
 
-	var recvStream io.Reader
-
 	if r.FirstElementNeedsReplication {
-		task.Log().Debug("first element needs replication")
-		version := r.PullList[0]
-		task.Log().WithField("version", version).Debug("requesting snapshot stream")
-		req := InitialTransferRequest{
-			Filesystem:        r.SourceFS,
-			FilesystemVersion: version,
-		}
-		if err := remote.Call("InitialTransferRequest", &req, &recvStream); err != nil {
-			task.Log().WithError(err).Error("cannot request initial transfer")
-			return true
-		}
-		task.Log().Debug("received initial transfer request response")
-		if hadError = r.recv(task, recvStream); hadError {
-			return hadError
-		}
-	}
 
-	task.Log().Debug("follow PushList")
-	for i := 0; i < len(r.PullList)-1; i++ {
-		task.Log().Debug("requesting incremental snapshot stream")
-		// safe because we asserted len(r.PullList) % 2 == 0
-		from, to := r.PullList[i], r.PullList[i+1]
-		req := IncrementalTransferRequest{
-			Filesystem: r.SourceFS,
-			From:       from,
-			To:         to,
-		}
-		if err := remote.Call("IncrementalTransferRequest", &req, &recvStream); err != nil {
-			task.Log().WithError(err).Error("cannot request incremental snapshot stream")
-			hadError = true
-			break
-		}
-		task.Log().Debug("received incremental transfer request response")
-		hadError = r.recv(task, recvStream)
-		if hadError {
-			break
-		}
-	}
-
-	return hadError
-
-}
-
-func (r *DiffResolution) recv(task *Task, recvStream io.Reader) (hadError bool) {
-	task.Enter("recv")
-	defer task.Finish()
-
-	progressStream := task.ProgressUpdater(recvStream)
-
-	// always receive without mounting, since this could corrupt the receiving mountpoint hierechy
-	recvArgs := []string{"-u"}
-	if r.RollbackReceiveFS {
-		task.Log().Info("receive with forced rollback to replace placeholder filesystem")
-		recvArgs = append(recvArgs, "-F")
-	}
-
-	if err := zfs.ZFSRecv(r.ReceiveFS, progressStream, recvArgs...); err != nil {
-		task.Log().WithError(err).Error("cannot receive stream")
-		return true
-	}
-	return false
-}
-
-func (r *DiffResolution) Push(task *Task, remote rpc.RPCClient) {
-
-	if !r.NeedsAction {
-		return
-	}
-
-	if r.consistencyCheck(task) {
-		return
-	}
-
-	if r.FirstElementNeedsReplication {
 		task.Log().Debug("first element needs replication")
 		version := r.PullList[0]
 
-		sendStream, err := zfs.ZFSSend(r.SourceFS, &version, nil)
+		sendStream, err := sender.Send(sourceFS, &version, nil)
 		if err != nil {
 			task.Log().WithError(err).Error("cannot zfs send")
-			return
+			return true
 		}
 
 		task.Log().WithField("version", version).Debug("requesting recv")
-		req := RecvRequest{
-			Filesystem: r.SourceFS, // remote must map Source to their RecvFS
-			Stream:     sendStream,
-		}
-		var confirmation struct{}
-		if err := remote.Call("RecvRequest", &req, &confirmation); err != nil {
+
+		err = receiver.Receive(sourceFS, sendStream, r.RollbackReceiveFS)
+		if err != nil {
 			task.Log().WithError(err).Error("error requesting recv")
-			return
+			return true
 		}
 
 	}
 
 	task.Log().Debug("follow PullList")
+
 	for i := 0; i < len(r.PullList)-1; i++ {
 
 		// safe because we asserted len(r.PullList) % 2 == 0
 		from, to := r.PullList[i], r.PullList[i+1]
 
-		sendStream, err := zfs.ZFSSend(r.SourceFS, &from, &to)
+		sendStream, err := sender.Send(sourceFS, &from, &to)
 		if err != nil {
 			task.Log().WithError(err).Error("cannot zfs send incremental")
-			return
+			return true
 		}
-		req := RecvRequest{
-			Filesystem: r.SourceFS, // remote must map Source to their RecvFS
-			Stream:     sendStream,
-		}
-		var confirmation struct{}
-		if err := remote.Call("RecvRequest", &req, &confirmation); err != nil {
+		err = receiver.Receive(sourceFS, sendStream, r.RollbackReceiveFS)
+		if err != nil {
 			task.Log().WithError(err).Error("error requesting recv")
-			break
+			return true
 		}
 
 	}
 
+	return false
 }

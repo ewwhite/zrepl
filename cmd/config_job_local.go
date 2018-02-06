@@ -139,7 +139,7 @@ outer:
 
 		j.mainTask.Log().Debug("replicating from lhs to rhs")
 		j.mainTask.Enter("replicate")
-		puller := Puller{j.mainTask, local, j.Mapping, j.InitialReplPolicy}
+		puller := Puller{j.mainTask, pullerRemote{local}, j.Mapping, j.InitialReplPolicy}
 		puller.Pull()
 		j.mainTask.Finish()
 
