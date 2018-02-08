@@ -83,7 +83,8 @@ func (c *ChainedReader) Read(buf []byte) (n int, err error) {
 	n = 0
 
 	for c.curReader < len(c.Readers) {
-		n, err = c.Readers[c.curReader].Read(buf)
+		ni, err := c.Readers[c.curReader].Read(buf)
+		n += ni
 		if err == io.EOF {
 			c.curReader++
 			continue
