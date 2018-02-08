@@ -90,21 +90,32 @@ func (c *Client) Call(endpoint string, in, out interface{}) (err error) {
 		}
 	}
 
+	var sendType DataType
+	var inReader io.Reader
+	{
+		if inR, ok := in.(io.Reader); ok {
+			inReader = inR
+			sendType = DataTypeOctets
+		} else {
+			var buf bytes.Buffer
+			if err = json.NewEncoder(&buf).Encode(in); err != nil {
+				panic("cannot encode 'in' parameter")
+			}
+			inReader = &buf
+			sendType = DataTypeMarshaledJSON
+		}
+	}
+
 	h := Header{
 		Endpoint: endpoint,
-		DataType: DataTypeMarshaledJSON,
+		DataType: sendType,
 		Accept:   accept,
 	}
 
 	if err = c.writeRequest(&h); err != nil {
 		return err
 	}
-
-	var buf bytes.Buffer
-	if err = json.NewEncoder(&buf).Encode(in); err != nil {
-		panic("cannot encode 'in' parameter")
-	}
-	if err = c.ml.WriteData(&buf); err != nil {
+	if err = c.ml.WriteData(inReader); err != nil {
 		return err
 	}
 
