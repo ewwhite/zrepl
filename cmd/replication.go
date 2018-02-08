@@ -399,6 +399,78 @@ func (p *Puller) Pull() {
 
 }
 
+type Pusher struct {
+	Remote            pusherRemote
+	FilesystemFilter  zfs.DatasetFilter
+	VersionFilter     zfs.FilesystemVersionFilter
+	InitialReplPolicy InitialReplPolicy
+}
+
+func (p *Pusher) Send(sourcePath *zfs.DatasetPath, from, to *zfs.FilesystemVersion) (io.Reader, error) {
+	pass, err := p.FilesystemFilter.Filter(sourcePath)
+	if err != nil {
+		return nil, err
+	}
+	if !pass {
+		return nil, fmt.Errorf("invalid send request to pusher: filesystem forbidden by policy: %s", sourcePath.ToString())
+	}
+	return zfs.ZFSSend(sourcePath, from, to)
+}
+
+type pusherRemote struct {
+	commonRemote
+}
+
+func (r pusherRemote) Receive(sourcePath *zfs.DatasetPath, sendStream io.Reader, rollback bool) error {
+	req := ReceiveRequest{
+		ReceiveRequestHeader{sourcePath, rollback}, sendStream,
+	}
+	// FIXME: rpc should support 'multipart' params, i.e. array of JSON and io.Reader
+	reqReader, err := req.ToReader()
+	if err != nil {
+		panic(err)
+	}
+	var success struct{}
+	return r.Call("ReceiveRequest", reqReader, &success)
+}
+
+func (p *Pusher) Push(task *Task) {
+	task.Enter("push")
+	defer task.Finish()
+
+	lfss, err := zfs.ZFSListMapping(p.FilesystemFilter)
+	if err != nil {
+		task.Log().WithError(err).Error("error listing local filesystems")
+		return
+	}
+
+	for _, lfs := range lfss {
+		p.pushFilesystem(task, lfs)
+	}
+}
+
+func (p *Pusher) pushFilesystem(task *Task, path *zfs.DatasetPath) {
+	task.Enter("fs")
+	defer task.Finish()
+
+	lvs, err := zfs.ZFSListFilesystemVersions(path, p.VersionFilter)
+	if err != nil {
+		task.Log().WithError(err).Error("error listing local filesystem versions")
+		return
+	}
+
+	rvs, ok := p.Remote.FilesystemVersionsRequest(task.Log(), path)
+	if !ok {
+		return
+	}
+
+	diff := zfs.MakeFilesystemDiff(rvs, lvs)
+	task.Log().WithField("diff", diff).Debug("diff")
+	res := ResolveDiff(p.InitialReplPolicy, diff)
+	task.Log().WithField("resolution", res).Debug("resolution")
+	res.Resolve(task, p.Remote, p, path)
+}
+
 type DiffResoltionError struct {
 	Problem    string
 	Resolution string

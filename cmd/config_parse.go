@@ -174,6 +174,10 @@ func parseJob(c JobParsingContext, i map[string]interface{}) (j Job, err error) 
 		return parseSourceJob(c, name, i)
 	case "local":
 		return parseLocalJob(c, name, i)
+	case "push":
+		return parsePushJob(c, name, i)
+	case "sink":
+		return parseSinkJob(c, name, i)
 	default:
 		return nil, errors.Errorf("unknown job type '%s'", jobtype)
 	}

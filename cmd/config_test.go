@@ -16,6 +16,8 @@ func TestSampleConfigsAreParsedWithoutErrors(t *testing.T) {
 		"./sampleconf/localbackup/host1.yml",
 		"./sampleconf/pullbackup/backuphost.yml",
 		"./sampleconf/pullbackup/productionhost.yml",
+		"./sampleconf/pushbackup/backuphost.yml",
+		"./sampleconf/pushbackup/productionhost.yml",
 		"./sampleconf/random/debugging.yml",
 		"./sampleconf/random/logging.yml",
 	}
