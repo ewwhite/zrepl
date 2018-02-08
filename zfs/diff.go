@@ -102,7 +102,7 @@ func MakeFilesystemDiff(left, right []FilesystemVersion) (diff FilesystemDiff) {
 	if right == nil {
 		panic("right must not be nil")
 	}
-	if left == nil {
+	if left == nil || len(left) == 0 {
 		diff = FilesystemDiff{
 			IncrementalPath: nil,
 			Conflict:        ConflictAllRight,
@@ -180,6 +180,7 @@ outer:
 	}
 
 	diff = FilesystemDiff{
+		Conflict:        ConflictIncremental,
 		IncrementalPath: incPath,
 	}
 	return
