@@ -137,7 +137,7 @@ func (j *PullJob) doRun(ctx context.Context) {
 	}
 
 	j.task.Enter("pull")
-	puller := Puller{j.task, pullerRemote{client}, j.Mapping, j.InitialReplPolicy}
+	puller := Puller{j.task, pullerRemote{commonRemote{client}}, j.Mapping, j.InitialReplPolicy}
 	puller.Pull()
 	j.task.Finish()
 

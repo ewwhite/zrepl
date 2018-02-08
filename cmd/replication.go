@@ -59,7 +59,7 @@ func (p *Puller) Receive(sourcePath *zfs.DatasetPath, sendStream io.Reader, roll
 }
 
 type pullerRemote struct {
-	rpc.RPCClient
+	commonRemote
 }
 
 func (r pullerRemote) Send(sourcePath *zfs.DatasetPath, from, to *zfs.FilesystemVersion) (io.Reader, error) {
@@ -90,16 +90,31 @@ type remoteLocalMapping struct {
 	Local  *zfs.DatasetPath
 }
 
-func (p *Puller) getRemoteFilesystems() (rfs []*zfs.DatasetPath, ok bool) {
-	p.task.Enter("fetch_remote_fs_list")
-	defer p.task.Finish()
+type commonRemote struct {
+	rpc.RPCClient
+}
+
+func (r commonRemote) FilesystemRequest(task *Task) (rfs []*zfs.DatasetPath, ok bool) {
+	task.Enter("fetch_remote_fs_list")
+	defer task.Finish()
 
 	fsr := FilesystemRequest{}
-	if err := p.Remote.Call("FilesystemRequest", &fsr, &rfs); err != nil {
-		p.task.Log().WithError(err).Error("cannot fetch remote filesystem list")
+	if err := r.Call("FilesystemRequest", &fsr, &rfs); err != nil {
+		task.Log().WithError(err).Error("cannot fetch remote filesystem list")
 		return nil, false
 	}
 	return rfs, true
+}
+
+// filesystem as viewed by the caller, i.e. if remote maps filesystem to some path, it must evaluate that mapping for this request, too
+func (r commonRemote) FilesystemVersionsRequest(log Logger, filesystem *zfs.DatasetPath) (rvs []zfs.FilesystemVersion, ok bool) {
+	log.Info("requesting remote filesystem versions")
+	req := FilesystemVersionsRequest{filesystem}
+	if err := r.Call("FilesystemVersionsRequest", &req, &rvs); err != nil {
+		log.WithError(err).Error("cannot fetch remote filesystem versions list")
+		return rvs, false
+	}
+	return rvs, true
 }
 
 func (p *Puller) buildReplMapping(remoteFilesystems []*zfs.DatasetPath) (replMapping map[string]remoteLocalMapping, ok bool) {
@@ -240,13 +255,9 @@ func (p *Puller) diffFilesystem(m remoteLocalMapping, localFilesystemState map[s
 		}
 	}
 
-	log.Info("requesting remote filesystem versions")
-	r := FilesystemVersionsRequest{
-		Filesystem: m.Remote,
-	}
-	var theirVersions []zfs.FilesystemVersion
-	if err = p.Remote.Call("FilesystemVersionsRequest", &r, &theirVersions); err != nil {
-		return zfs.FilesystemDiff{}, errors.Wrap(err, "cannot get remote filesystem versions")
+	theirVersions, ok := p.Remote.FilesystemVersionsRequest(log, m.Remote)
+	if !ok {
+		return
 	}
 
 	log.Debug("computing diff between remote and local filesystem versions")
@@ -320,7 +331,7 @@ func (p *Puller) Pull() {
 	defer p.task.Finish()
 
 	p.task.Log().Info("request remote filesystem list")
-	remoteFilesystems, ok := p.getRemoteFilesystems()
+	remoteFilesystems, ok := p.Remote.FilesystemRequest(p.task)
 	if !ok {
 		return
 	}
