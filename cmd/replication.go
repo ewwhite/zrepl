@@ -417,6 +417,12 @@ type DiffResolution struct {
 }
 
 func (r *DiffResolution) consistencyCheck(task *Task) (hadError bool) {
+	if r.Error != nil {
+		return false
+	}
+	if !r.NeedsAction {
+		return false
+	}
 	if r.PullList == nil || len(r.PullList) < 1 {
 		task.Log().Error("resolution is inconsistent: PullList nil or len(PullList) == 0 but no Error")
 		return true
@@ -440,6 +446,11 @@ type Sender interface {
 }
 
 func (r *DiffResolution) Resolve(task *Task, receiver Receiver, sender Sender, sourceFS *zfs.DatasetPath) (hadError bool) {
+
+	if r.Error != nil {
+		task.Log().WithError(r.Error).Error("cannot resolve diff")
+		return true
+	}
 
 	if !r.NeedsAction {
 		return false
