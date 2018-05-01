@@ -83,7 +83,7 @@ func (f FilesystemDiff) String() (str string) {
 	case ConflictIncremental:
 		fmt.Fprintf(&b, "incremental path length %v, common ancestor at %s", len(f.IncrementalPath)-1, f.IncrementalPath[0])
 	case ConflictAllRight:
-		fmt.Fprintf(&b, "%v versions, most recent is %s", len(f.MRCAPathRight)-1, f.MRCAPathRight[len(f.MRCAPathRight)-1])
+		fmt.Fprintf(&b, "%v versions, most recent is %s", len(f.IncrementalPath)-1, f.IncrementalPath[len(f.IncrementalPath)-1])
 	case ConflictDiverged:
 		fmt.Fprintf(&b, "diverged at %s", f.MRCAPathRight[0]) // right always has at least one snap...?
 	case ConflictNoCommonAncestor:
@@ -143,7 +143,7 @@ outer:
 	}
 
 	// no common ancestor?
-	if mrcaLeft == -1 {
+	if mrcaLeft == -1 { // also true for len(left) == 0
 		diff = FilesystemDiff{
 			IncrementalPath: nil,
 			Conflict:        ConflictNoCommonAncestor,
