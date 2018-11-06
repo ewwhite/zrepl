@@ -113,14 +113,14 @@ func (s *Sender) GetSendToken(ctx context.Context, r *pdu.SendTokenReq) (*pdu.Se
 	}
 }
 
-func (s *Sender) DoSend(token string) (io.ReadCloser, error) {
+func (s *Sender) DoSend(ctx context.Context, token string) (io.ReadCloser, error) {
 	rI, err := s.tokenStore.Take(token)
 	if err != nil {
 		return nil, err
 	}
 	r := rI.(*pdu.SendTokenReq)
 
-	stream, err := zfs.ZFSSend(context.Background(), r.Filesystem, r.From, r.To, "")
+	stream, err := zfs.ZFSSend(ctx, r.Filesystem, r.From, r.To, "")
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +131,7 @@ func (s *Sender) GetReceiveToken(context.Context, *pdu.ReceiveTokenReq) (*pdu.Re
 	return nil, fmt.Errorf("this is a sender endpoint")
 }
 
-func (s *Sender) DoReceive(token string, zfsStream io.ReadCloser) error {
+func (s *Sender) DoReceive(ctx context.Context, token string, zfsStream io.ReadCloser) error {
 	return fmt.Errorf("this is a sender endpoint")
 }
 
@@ -306,7 +306,7 @@ func (s *Receiver) ReplicationCursor(context.Context, *pdu.ReplicationCursorReq)
 func (s *Receiver) GetSendToken(context.Context, *pdu.SendTokenReq) (*pdu.SendTokenRes, error) {
 	return nil, fmt.Errorf("Send not implemented for Receiver")
 }
-func (s *Receiver) DoSend(token string) (io.ReadCloser, error) {
+func (s *Receiver) DoSend(ctx context.Context, token string) (io.ReadCloser, error) {
 	return nil, fmt.Errorf("DoSend not implemented for Receiver")
 }
 
@@ -330,7 +330,7 @@ func (s *Receiver) GetReceiveToken(ctx context.Context, req *pdu.ReceiveTokenReq
 	return &pdu.ReceiveTokenRes{ReceiveToken: token}, nil
 }
 
-func (s *Receiver) DoReceive(token string, zfsStream io.ReadCloser) error {
+func (s *Receiver) DoReceive(ctx context.Context, token string, zfsStream io.ReadCloser) error {
 	defer zfsStream.Close()
 
 	rI, err := s.tokenStore.Take(token)
@@ -343,8 +343,6 @@ func (s *Receiver) DoReceive(token string, zfsStream io.ReadCloser) error {
 	if err != nil {
 		return err
 	}
-
-	ctx := context.Background() // FIXME
 
 	getLogger(ctx).Debug("incoming Receive")
 
@@ -444,8 +442,8 @@ func doDestroySnapshots(ctx context.Context, lp *zfs.DatasetPath, snaps []*pdu.F
 // FIXME name
 type ReplicationServer interface {
 	pdu.ReplicationServer
-	DoSend(token string) (io.ReadCloser, error)
-	DoReceive(token string, zfsStream io.ReadCloser) error
+	DoSend(ctx context.Context, token string) (io.ReadCloser, error)
+	DoReceive(ctx context.Context, token string, zfsStream io.ReadCloser) error
 }
 
 // HttpHandler implements http.Handler for a Receiver or Sender
@@ -456,8 +454,8 @@ type HttpHandler struct {
 
 var _ http.Handler
 
-const DoSendPathPrefix = "/zrepl/DoSend/"
-const DoReceivePathPrefix = "/zrepl/DoRecieve"
+const DoSendPathPrefix = "/zrepl/DoSend/" // trailing slash is important for http.ServeMux patterns
+const DoReceivePathPrefix = "/zrepl/DoReceive/" // trailing slash is important for http.ServeMux patterns
 
 func init() {
 	if strings.HasPrefix(pdu.ReplicationServerPathPrefix, DoSendPathPrefix) {
@@ -493,7 +491,7 @@ func (s *HttpHandler) handleSendRecv(mode int, w http.ResponseWriter, r *http.Re
 	default:
 		panic(fmt.Sprintf("implementation error: unknown mode %d", mode))
 	case 0:
-		stream, err := s.srv.DoSend(token)
+		stream, err := s.srv.DoSend(r.Context(), token)
 		if err != nil {
 			// TODO classify error as server or client side
 			w.WriteHeader(500)
@@ -508,7 +506,7 @@ func (s *HttpHandler) handleSendRecv(mode int, w http.ResponseWriter, r *http.Re
 			}
 		}
 	case 1:
-		err := s.srv.DoReceive(token, r.Body)
+		err := s.srv.DoReceive(r.Context(), token, r.Body)
 		if err != nil {
 			// TODO classify error as server or client side
 			w.WriteHeader(500)
@@ -564,7 +562,7 @@ func (c *HttpClient) Send(ctx context.Context, r *pdu.SendTokenReq) (*pdu.SendTo
 		return res, nil, nil
 	}
 
-	url := fmt.Sprintf("http://daemon/%s/%s", DoSendPathPrefix, res.GetSendToken())
+	url := fmt.Sprintf("http://daemon%s%s", DoSendPathPrefix, res.GetSendToken())
 	sendRes, err := c.bulkTransferClient.Get(url)
 	if err != nil {
 		return nil, nil, err
@@ -585,7 +583,7 @@ func (c *HttpClient) Receive(ctx context.Context, r *pdu.ReceiveTokenReq, sendSt
 		return err
 	}
 
-	url := fmt.Sprintf("http://daemon/%s/%s", DoReceivePathPrefix, res.GetReceiveToken())
+	url := fmt.Sprintf("http://daemon%s%s", DoReceivePathPrefix, res.GetReceiveToken())
 	receiveRes, err := c.bulkTransferClient.Post(url, "application/octet-stream", sendStream)
 	if err != nil {
 		return err
@@ -619,7 +617,7 @@ func (c LocalClient) Send(ctx context.Context, r *pdu.SendTokenReq) (*pdu.SendTo
 		return res, nil, nil
 	}
 
-	stream, err := c.ReplicationServer.DoSend(res.GetSendToken())
+	stream, err := c.ReplicationServer.DoSend(ctx, res.GetSendToken())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -632,7 +630,7 @@ func (c LocalClient) Receive(ctx context.Context, r *pdu.ReceiveTokenReq, sendSt
 	if err != nil {
 		return err
 	}
-	err = c.ReplicationServer.DoReceive(res.GetReceiveToken(), sendStream)
+	err = c.ReplicationServer.DoReceive(ctx, res.GetReceiveToken(), sendStream)
 	if err != nil {
 		return err
 	}

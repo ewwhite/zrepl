@@ -16,6 +16,7 @@ import (
 	"github.com/zrepl/zrepl/endpoint/tokenstore"
 	"github.com/zrepl/zrepl/zfs"
 	"net/http"
+	"sync/atomic"
 )
 
 type PassiveSide struct {
@@ -125,8 +126,8 @@ func (j *PassiveSide) Run(ctx context.Context) {
 
 	defer j.tokenStoreStop()
 
-	ctx = logging.WithSubsystemLoggers(ctx, log)
 	{
+		ctx := logging.WithSubsystemLoggers(ctx, log) // shadowing
 		ctx, cancel := context.WithCancel(ctx) // shadowing
 		defer cancel()
 		go j.mode.RunPeriodic(ctx)
@@ -144,7 +145,19 @@ func (j *PassiveSide) Run(ctx context.Context) {
 	}
 	defer listener.Close()
 
-	server := transporthttpinjector.NewServer(listener, handler)
+	// FIXME hacky
+	var connId uint64
+	requestLogger := http.NewServeMux()
+	requestLogger.HandleFunc("/", func(writer http.ResponseWriter, request *http.Request) {
+		connId := atomic.AddUint64(&connId, 1)
+		log := log.WithField("connID", connId) // shadow
+		log.WithField("uri", request.RequestURI).Debug("handling request")
+		request = request.WithContext(logging.WithSubsystemLoggers(request.Context(), log))
+		handler.ServeHTTP(writer, request)
+		log.WithField("uri", request.RequestURI).Debug("finished request")
+	})
+
+	server := transporthttpinjector.NewServer(listener, requestLogger)
 	if err := server.Serve(ctx); err != nil {
 		if err != context.Canceled {
 			log.WithError(err).Error("error serving")
