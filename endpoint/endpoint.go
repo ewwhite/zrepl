@@ -2,25 +2,35 @@
 package endpoint
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"github.com/golang/protobuf/proto"
 	"github.com/pkg/errors"
-	"github.com/problame/go-streamrpc"
 	"github.com/zrepl/zrepl/replication"
 	"github.com/zrepl/zrepl/replication/pdu"
+	"github.com/zrepl/zrepl/util/envconst"
 	"github.com/zrepl/zrepl/zfs"
 	"io"
+	"net/http"
+	"path"
+	"strings"
+	"time"
 )
+
+type TokenStore interface {
+	Add(data interface{}, expirationTime time.Time) (token string, err error)
+	Take(token string) (data interface{}, err error)
+}
 
 // Sender implements replication.ReplicationEndpoint for a sending side
 type Sender struct {
-	FSFilter                zfs.DatasetFilter
+	FSFilter   zfs.DatasetFilter
+	tokenStore TokenStore
 }
 
-func NewSender(fsf zfs.DatasetFilter) *Sender {
-	return &Sender{FSFilter: fsf}
+var _ ReplicationServer = &Sender{}
+
+func NewSender(fsf zfs.DatasetFilter, tokenStore TokenStore) *Sender {
+	return &Sender{FSFilter: fsf, tokenStore: tokenStore}
 }
 
 func (s *Sender) filterCheckFS(fs string) (*zfs.DatasetPath, error) {
@@ -41,8 +51,9 @@ func (s *Sender) filterCheckFS(fs string) (*zfs.DatasetPath, error) {
 	return dp, nil
 }
 
-func (p *Sender) ListFilesystems(ctx context.Context) ([]*pdu.Filesystem, error) {
-	fss, err := zfs.ZFSListMapping(p.FSFilter)
+
+func (s *Sender) ListFilesystems(ctx context.Context, r *pdu.ListFilesystemReq) (*pdu.ListFilesystemRes, error) {
+	fss, err := zfs.ZFSListMapping(s.FSFilter)
 	if err != nil {
 		return nil, err
 	}
@@ -53,11 +64,12 @@ func (p *Sender) ListFilesystems(ctx context.Context) ([]*pdu.Filesystem, error)
 			// FIXME: not supporting ResumeToken yet
 		}
 	}
-	return rfss, nil
+	res := &pdu.ListFilesystemRes{Filesystems: rfss}
+	return res, nil
 }
 
-func (p *Sender) ListFilesystemVersions(ctx context.Context, fs string) ([]*pdu.FilesystemVersion, error) {
-	lp, err := p.filterCheckFS(fs)
+func (s *Sender) ListFilesystemVersions(ctx context.Context, r *pdu.ListFilesystemVersionsReq) (*pdu.ListFilesystemVersionsRes, error) {
+	lp, err := s.filterCheckFS(r.GetFilesystem())
 	if err != nil {
 		return nil, err
 	}
@@ -69,32 +81,57 @@ func (p *Sender) ListFilesystemVersions(ctx context.Context, fs string) ([]*pdu.
 	for i := range fsvs {
 		rfsvs[i] = pdu.FilesystemVersionFromZFS(&fsvs[i])
 	}
-	return rfsvs, nil
+	res := &pdu.ListFilesystemVersionsRes{Versions: rfsvs}
+	return res, nil
+
 }
 
-func (p *Sender) Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, io.ReadCloser, error) {
-	_, err := p.filterCheckFS(r.Filesystem)
+func (s *Sender) GetSendToken(ctx context.Context, r *pdu.SendTokenReq) (*pdu.SendTokenRes, error) {
+	_, err := s.filterCheckFS(r.Filesystem)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	if r.DryRun {
 		si, err := zfs.ZFSSendDry(r.Filesystem, r.From, r.To, "")
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		var expSize int64 = 0 // protocol says 0 means no estimate
 		if si.SizeEstimate != -1 { // but si returns -1 for no size estimate
 			expSize = si.SizeEstimate
 		}
-		return &pdu.SendRes{ExpectedSize: expSize}, nil, nil
+		return &pdu.SendTokenRes{ExpectedSize: expSize}, nil
 	} else {
-		stream, err := zfs.ZFSSend(ctx, r.Filesystem, r.From, r.To, "")
+		expTime := time.Now().Add(envconst.Duration("ENDPOINT_SENDER_TOKEN_EXPIRATION", 10*time.Second))
+		tok, err := s.tokenStore.Add(r, expTime)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		return &pdu.SendRes{}, stream, nil
+		return &pdu.SendTokenRes{SendToken: tok}, nil
 	}
+}
+
+func (s *Sender) DoSend(token string) (io.ReadCloser, error) {
+	rI, err := s.tokenStore.Take(token)
+	if err != nil {
+		return nil, err
+	}
+	r := rI.(*pdu.SendTokenReq)
+
+	stream, err := zfs.ZFSSend(context.Background(), r.Filesystem, r.From, r.To, "")
+	if err != nil {
+		return nil, err
+	}
+	return stream, nil
+}
+
+func (s *Sender) GetReceiveToken(context.Context, *pdu.ReceiveTokenReq) (*pdu.ReceiveTokenRes, error) {
+	return nil, fmt.Errorf("this is a sender endpoint")
+}
+
+func (s *Sender) DoReceive(token string, zfsStream io.ReadCloser) error {
+	return fmt.Errorf("this is a sender endpoint")
 }
 
 func (p *Sender) DestroySnapshots(ctx context.Context, req *pdu.DestroySnapshotsReq) (*pdu.DestroySnapshotsRes, error) {
@@ -147,13 +184,16 @@ type FSMap interface { // FIXME unused
 // Receiver implements replication.ReplicationEndpoint for a receiving side
 type Receiver struct {
 	root *zfs.DatasetPath
+	tokenStore TokenStore
 }
 
-func NewReceiver(rootDataset *zfs.DatasetPath) (*Receiver, error) {
+var _ ReplicationServer = &Receiver{}
+
+func NewReceiver(rootDataset *zfs.DatasetPath, tokenStore TokenStore) (*Receiver, error) {
 	if rootDataset.Length() <= 0 {
 		return nil, errors.New("root dataset must not be an empty path")
 	}
-	return &Receiver{root: rootDataset.Copy()}, nil
+	return &Receiver{root: rootDataset.Copy(), tokenStore: tokenStore}, nil
 }
 
 type subroot struct {
@@ -180,8 +220,9 @@ func (f subroot) MapToLocal(fs string) (*zfs.DatasetPath, error) {
 	return c, nil
 }
 
-func (e *Receiver) ListFilesystems(ctx context.Context) ([]*pdu.Filesystem, error) {
-	filtered, err := zfs.ZFSListMapping(subroot{e.root})
+
+func (s *Receiver) ListFilesystems(ctx context.Context, req *pdu.ListFilesystemReq) (*pdu.ListFilesystemRes, error) {
+	filtered, err := zfs.ZFSListMapping(subroot{s.root})
 	if err != nil {
 		return nil, err
 	}
@@ -199,14 +240,14 @@ func (e *Receiver) ListFilesystems(ctx context.Context) ([]*pdu.Filesystem, erro
 		if ph {
 			continue
 		}
-		a.TrimPrefix(e.root)
+		a.TrimPrefix(s.root)
 		fss = append(fss, &pdu.Filesystem{Path: a.ToString()})
 	}
-	return fss, nil
+	return &pdu.ListFilesystemRes{Filesystems: fss}, nil
 }
 
-func (e *Receiver) ListFilesystemVersions(ctx context.Context, fs string) ([]*pdu.FilesystemVersion, error) {
-	lp, err := subroot{e.root}.MapToLocal(fs)
+func (s *Receiver) ListFilesystemVersions(ctx context.Context, req *pdu.ListFilesystemVersionsReq) (*pdu.ListFilesystemVersionsRes, error) {
+	lp, err := subroot{s.root}.MapToLocal(req.GetFilesystem())
 	if err != nil {
 		return nil, err
 	}
@@ -221,16 +262,50 @@ func (e *Receiver) ListFilesystemVersions(ctx context.Context, fs string) ([]*pd
 		rfsvs[i] = pdu.FilesystemVersionFromZFS(&fsvs[i])
 	}
 
-	return rfsvs, nil
+	return &pdu.ListFilesystemVersionsRes{Versions: rfsvs}, nil
 }
 
-func (e *Receiver) Receive(ctx context.Context, req *pdu.ReceiveReq, sendStream io.ReadCloser) error {
-	defer sendStream.Close()
+func (s *Receiver) ReplicationCursor(context.Context, *pdu.ReplicationCursorReq) (*pdu.ReplicationCursorRes, error) {
+	return nil, fmt.Errorf("ReplicationCursor not implemented for Receiver")
+}
 
-	lp, err := subroot{e.root}.MapToLocal(req.Filesystem)
+func (s *Receiver) GetSendToken(context.Context, *pdu.SendTokenReq) (*pdu.SendTokenRes, error) {
+	return nil, fmt.Errorf("Send not implemented for Receiver")
+}
+func (s *Receiver) DoSend(token string) (io.ReadCloser, error) {
+	return nil, fmt.Errorf("DoSend not implemented for Receiver")
+}
+
+func (s *Receiver) GetReceiveToken(ctx context.Context, req *pdu.ReceiveTokenReq) (*pdu.ReceiveTokenRes, error) {
+
+	_, err := subroot{s.root}.MapToLocal(req.Filesystem)
+	if err != nil {
+		return nil, err
+	}
+
+	expTime := time.Now().Add(envconst.Duration("ENDPOINT_RECEIVER_TOKEN_EXPIRATION", 10*time.Second))
+	token, err := s.tokenStore.Add(req, expTime)
+	if err != nil {
+		return nil, err
+	}
+	return &pdu.ReceiveTokenRes{ReceiveToken: token}, nil
+}
+
+func (s *Receiver) DoReceive(token string, zfsStream io.ReadCloser) error {
+	defer zfsStream.Close()
+
+	rI, err := s.tokenStore.Take(token)
 	if err != nil {
 		return err
 	}
+	r := rI.(*pdu.ReceiveTokenReq)
+
+	lp, err := subroot{s.root}.MapToLocal(r.Filesystem) // FIXME this work has already been done
+	if err != nil {
+		return err
+	}
+
+	ctx := context.Background() // FIXME
 
 	getLogger(ctx).Debug("incoming Receive")
 
@@ -261,7 +336,7 @@ func (e *Receiver) Receive(ctx context.Context, req *pdu.ReceiveReq, sendStream 
 	getLogger(ctx).WithField("visitErr", visitErr).Debug("complete tree-walk")
 
 	if visitErr != nil {
-		return visitErr
+		return err
 	}
 
 	needForceRecv := false
@@ -279,19 +354,18 @@ func (e *Receiver) Receive(ctx context.Context, req *pdu.ReceiveReq, sendStream 
 
 	getLogger(ctx).Debug("start receive command")
 
-	if err := zfs.ZFSRecv(ctx, lp.ToString(), sendStream, args...); err != nil {
+	if err := zfs.ZFSRecv(ctx, lp.ToString(), zfsStream, args...); err != nil {
 		getLogger(ctx).
 			WithError(err).
 			WithField("args", args).
 			Error("zfs receive failed")
-		sendStream.Close()
 		return err
 	}
 	return nil
 }
 
-func (e *Receiver) DestroySnapshots(ctx context.Context, req *pdu.DestroySnapshotsReq) (*pdu.DestroySnapshotsRes, error) {
-	lp, err := subroot{e.root}.MapToLocal(req.Filesystem)
+func (s *Receiver) DestroySnapshots(ctx context.Context, req *pdu.DestroySnapshotsReq) (*pdu.DestroySnapshotsRes, error) {
+	lp, err := subroot{s.root}.MapToLocal(req.Filesystem)
 	if err != nil {
 		return nil, err
 	}
@@ -327,288 +401,139 @@ func doDestroySnapshots(ctx context.Context, lp *zfs.DatasetPath, snaps []*pdu.F
 	return res, nil
 }
 
-// =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-// RPC STUBS
-// =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-
-const (
-	RPCListFilesystems        = "ListFilesystems"
-	RPCListFilesystemVersions = "ListFilesystemVersions"
-	RPCReceive                = "Receive"
-	RPCSend                   = "Send"
-	RPCSDestroySnapshots      = "DestroySnapshots"
-	RPCReplicationCursor      = "ReplicationCursor"
-)
-
-// Remote implements an endpoint stub that uses streamrpc as a transport.
-type Remote struct {
-	c *streamrpc.Client
+// FIXME name
+type ReplicationServer interface {
+	pdu.ReplicationServer
+	DoSend(token string) (io.ReadCloser, error)
+	DoReceive(token string, zfsStream io.ReadCloser) error
 }
 
-func NewRemote(c *streamrpc.Client) Remote {
-	return Remote{c}
+// HttpServer implements http.Handler for a Receiver or Sender
+type HttpServer struct {
+	mux *http.ServeMux
+	srv ReplicationServer
 }
 
-func (s Remote) ListFilesystems(ctx context.Context) ([]*pdu.Filesystem, error) {
-	req := pdu.ListFilesystemReq{}
-	b, err := proto.Marshal(&req)
-	if err != nil {
-		return nil, err
+var _ http.Handler
+
+const DoSendPathPrefix = "/zrepl/DoSend/"
+const DoReceivePathPrefix = "/zrepl/DoRecieve"
+
+func init() {
+	if strings.HasPrefix(pdu.ReplicationServerPathPrefix, DoSendPathPrefix) {
+		panic(fmt.Sprintf("ReplicationServerPathPrefix must not have DoSendPathPrefix"))
 	}
-	rb, rs, err := s.c.RequestReply(ctx, RPCListFilesystems, bytes.NewBuffer(b), nil)
-	if err != nil {
-		return nil, err
+	if strings.HasPrefix(pdu.ReplicationServerPathPrefix, DoReceivePathPrefix) {
+		panic(fmt.Sprintf("ReplicationServerPathPrefix must not have DoReceivePathPrefix"))
 	}
-	if rs != nil {
-		rs.Close()
-		return nil, errors.New("response contains unexpected stream")
-	}
-	var res pdu.ListFilesystemRes
-	if err := proto.Unmarshal(rb.Bytes(), &res); err != nil {
-		return nil, err
-	}
-	return res.Filesystems, nil
 }
 
-func (s Remote) ListFilesystemVersions(ctx context.Context, fs string) ([]*pdu.FilesystemVersion, error) {
-	req := pdu.ListFilesystemVersionsReq{
-		Filesystem: fs,
+func NewServer(srv ReplicationServer) *HttpServer {
+	s := &HttpServer{
+		mux: http.NewServeMux(),
+		srv: srv,
 	}
-	b, err := proto.Marshal(&req)
-	if err != nil {
-		return nil, err
-	}
-	rb, rs, err := s.c.RequestReply(ctx, RPCListFilesystemVersions, bytes.NewBuffer(b), nil)
-	if err != nil {
-		return nil, err
-	}
-	if rs != nil {
-		rs.Close()
-		return nil, errors.New("response contains unexpected stream")
-	}
-	var res pdu.ListFilesystemVersionsRes
-	if err := proto.Unmarshal(rb.Bytes(), &res); err != nil {
-		return nil, err
-	}
-	return res.Versions, nil
+	twirpHandler := pdu.NewReplicationServerServer(s.srv, nil)
+	s.mux.Handle(pdu.ReplicationServerPathPrefix, twirpHandler)
+	s.mux.HandleFunc(DoSendPathPrefix, func(w http.ResponseWriter, r *http.Request) {
+		s.handleSendRecv(0, w, r)
+	})
+	s.mux.HandleFunc(DoReceivePathPrefix, func(w http.ResponseWriter, r *http.Request) {
+		s.handleSendRecv(1, w, r)
+	})
+	return s
 }
 
-func (s Remote) Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, io.ReadCloser, error) {
-	b, err := proto.Marshal(r)
+func (s *HttpServer) handleSendRecv(mode int, w http.ResponseWriter, r *http.Request) {
+
+	// decode token from URL
+	token := path.Base(r.URL.Path)
+
+	switch mode {
+	default:
+		panic(fmt.Sprintf("implementation error: unknown mode %d", mode))
+	case 0:
+		stream, err := s.srv.DoSend(token)
+		if err != nil {
+			// TODO classify error as server or client side
+			w.WriteHeader(500)
+			fmt.Fprintf(w, "%s", err)
+		} else {
+			w.WriteHeader(200)
+			_, err := io.Copy(w, stream)
+			// this error could be on the receiving side, network related, or our side
+			// thus, we should log it
+			if err != nil {
+				// TODO log it
+			}
+		}
+	case 1:
+		err := s.srv.DoReceive(token, r.Body)
+		if err != nil {
+			// TODO classify error as server or client side
+			w.WriteHeader(500)
+			fmt.Fprintf(w , "%s", err)
+		} else {
+			w.WriteHeader(200)
+			fmt.Fprintf(w, "transfer successful")
+		}
+	}
+}
+
+func (s *HttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.ServeHTTP(w, r)
+}
+
+// Client implements the interfaces required by package replication
+type Client struct {
+	baseURL string
+	client http.Client // TODO ideally, the same client as pdu.ReplicationServer ?
+	pdu.ReplicationServer // the client instance
+}
+
+var _ replication.Endpoint = &Client{}
+var _ replication.Sender = &Client{}
+var _ replication.Receiver = &Client{}
+
+func (c *Client) Send(ctx context.Context, r *pdu.SendTokenReq) (*pdu.SendTokenRes, io.ReadCloser, error) {
+	res, err := c.ReplicationServer.GetSendToken(ctx, r)
 	if err != nil {
 		return nil, nil, err
 	}
-	rb, rs, err := s.c.RequestReply(ctx, RPCSend, bytes.NewBuffer(b), nil)
+	if r.DryRun {
+		return res, nil, nil
+	}
+
+	url := fmt.Sprintf("%s%s", c.baseURL, DoSendPathPrefix)
+	sendRes, err := c.client.Get(url)
 	if err != nil {
 		return nil, nil, err
 	}
-	if !r.DryRun && rs == nil {
-		return nil, nil, errors.New("response does not contain a stream")
+	if sendRes.StatusCode != 200 { // TODO 200 too restrictive?
+		var errorMsg strings.Builder
+		io.Copy(&errorMsg, io.LimitReader(sendRes.Body, 1 << 15)) // TODO error handling?
+		return nil, nil, fmt.Errorf("remote send error: %s", strings.TrimSpace(errorMsg.String()))
 	}
-	if r.DryRun && rs != nil {
-		rs.Close()
-		return nil, nil, errors.New("response contains unexpected stream (was dry run)")
-	}
-	var res pdu.SendRes
-	if err := proto.Unmarshal(rb.Bytes(), &res); err != nil {
-		rs.Close()
-		return nil, nil, err
-	}
-	return &res, rs, nil
+	return res, sendRes.Body, nil
 }
 
-func (s Remote) Receive(ctx context.Context, r *pdu.ReceiveReq, sendStream io.ReadCloser) error {
+func (c *Client) Receive(ctx context.Context, r *pdu.ReceiveTokenReq, sendStream io.ReadCloser) error {
 	defer sendStream.Close()
-	b, err := proto.Marshal(r)
+
+	res, err := c.ReplicationServer.GetReceiveToken(ctx, r)
 	if err != nil {
 		return err
 	}
-	rb, rs, err := s.c.RequestReply(ctx, RPCReceive, bytes.NewBuffer(b), sendStream)
-	getLogger(ctx).WithField("err", err).Debug("Remote.Receive RequestReplyReturned")
+
+	url := fmt.Sprintf("%s%s/%s", c.baseURL, DoReceivePathPrefix, res.GetReceiveToken())
+	receiveRes, err := c.client.Post(url, "application/octet-stream", sendStream)
 	if err != nil {
 		return err
 	}
-	if rs != nil {
-		rs.Close()
-		return errors.New("response contains unexpected stream")
-	}
-	var res pdu.ReceiveRes
-	if err := proto.Unmarshal(rb.Bytes(), &res); err != nil {
-		return err
+	if receiveRes.StatusCode != 200 { // TODO 200 too restrictive?
+		var errorMsg strings.Builder
+		io.Copy(&errorMsg, io.LimitReader(receiveRes.Body, 1 << 15)) // TODO error handling?
+		return fmt.Errorf("remote receive error: %s", strings.TrimSpace(errorMsg.String()))
 	}
 	return nil
-}
-
-func (s Remote) DestroySnapshots(ctx context.Context, r *pdu.DestroySnapshotsReq) (*pdu.DestroySnapshotsRes, error) {
-	b, err := proto.Marshal(r)
-	if err != nil {
-		return nil, err
-	}
-	rb, rs, err := s.c.RequestReply(ctx, RPCSDestroySnapshots, bytes.NewBuffer(b), nil)
-	if err != nil {
-		return nil, err
-	}
-	if rs != nil {
-		rs.Close()
-		return nil, errors.New("response contains unexpected stream")
-	}
-	var res pdu.DestroySnapshotsRes
-	if err := proto.Unmarshal(rb.Bytes(), &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-func (s Remote) ReplicationCursor(ctx context.Context, req *pdu.ReplicationCursorReq) (*pdu.ReplicationCursorRes, error) {
-	b, err := proto.Marshal(req)
-	if err != nil {
-		return nil, err
-	}
-	rb, rs, err := s.c.RequestReply(ctx, RPCReplicationCursor, bytes.NewBuffer(b), nil)
-	if err != nil {
-		return nil, err
-	}
-	if rs != nil {
-		rs.Close()
-		return nil, errors.New("response contains unexpected stream")
-	}
-	var res pdu.ReplicationCursorRes
-	if err := proto.Unmarshal(rb.Bytes(), &res); err != nil {
-		return nil, err
-	}
-	return &res, nil
-}
-
-// Handler implements the server-side streamrpc.HandlerFunc for a Remote endpoint stub.
-type Handler struct {
-	ep replication.Endpoint
-}
-
-func NewHandler(ep replication.Endpoint) Handler {
-	return Handler{ep}
-}
-
-func (a *Handler) Handle(ctx context.Context, endpoint string, reqStructured *bytes.Buffer, reqStream io.ReadCloser) (resStructured *bytes.Buffer, resStream io.ReadCloser, err error) {
-
-	switch endpoint {
-	case RPCListFilesystems:
-		var req pdu.ListFilesystemReq
-		if err := proto.Unmarshal(reqStructured.Bytes(), &req); err != nil {
-			return nil, nil, err
-		}
-		fsses, err := a.ep.ListFilesystems(ctx)
-		if err != nil {
-			return nil, nil, err
-		}
-		res := &pdu.ListFilesystemRes{
-			Filesystems: fsses,
-		}
-		b, err := proto.Marshal(res)
-		if err != nil {
-			return nil, nil, err
-		}
-		return bytes.NewBuffer(b), nil, nil
-
-	case RPCListFilesystemVersions:
-
-		var req pdu.ListFilesystemVersionsReq
-		if err := proto.Unmarshal(reqStructured.Bytes(), &req); err != nil {
-			return nil, nil, err
-		}
-		fsvs, err := a.ep.ListFilesystemVersions(ctx, req.Filesystem)
-		if err != nil {
-			return nil, nil, err
-		}
-		res := &pdu.ListFilesystemVersionsRes{
-			Versions: fsvs,
-		}
-		b, err := proto.Marshal(res)
-		if err != nil {
-			return nil, nil, err
-		}
-		return bytes.NewBuffer(b), nil, nil
-
-	case RPCSend:
-
-		sender, ok := a.ep.(replication.Sender)
-		if !ok {
-			goto Err
-		}
-
-		var req pdu.SendReq
-		if err := proto.Unmarshal(reqStructured.Bytes(), &req); err != nil {
-			return nil, nil, err
-		}
-		res, sendStream, err := sender.Send(ctx, &req)
-		if err != nil {
-			return nil, nil, err
-		}
-		b, err := proto.Marshal(res)
-		if err != nil {
-			return nil, nil, err
-		}
-		return bytes.NewBuffer(b), sendStream, err
-
-	case RPCReceive:
-
-		receiver, ok := a.ep.(replication.Receiver)
-		if !ok {
-			goto Err
-		}
-
-		var req pdu.ReceiveReq
-		if err := proto.Unmarshal(reqStructured.Bytes(), &req); err != nil {
-			return nil, nil, err
-		}
-		err := receiver.Receive(ctx, &req, reqStream)
-		if err != nil {
-			return nil, nil, err
-		}
-		b, err := proto.Marshal(&pdu.ReceiveRes{})
-		if err != nil {
-			return nil, nil, err
-		}
-		return bytes.NewBuffer(b), nil, err
-
-	case RPCSDestroySnapshots:
-
-		var req pdu.DestroySnapshotsReq
-		if err := proto.Unmarshal(reqStructured.Bytes(), &req); err != nil {
-			return nil, nil, err
-		}
-
-		res, err := a.ep.DestroySnapshots(ctx, &req)
-		if err != nil {
-			return nil, nil, err
-		}
-		b, err := proto.Marshal(res)
-		if err != nil {
-			return nil, nil, err
-		}
-		return bytes.NewBuffer(b), nil, nil
-
-	case RPCReplicationCursor:
-
-		sender, ok := a.ep.(replication.Sender)
-		if !ok {
-			goto Err
-		}
-
-		var req pdu.ReplicationCursorReq
-		if err := proto.Unmarshal(reqStructured.Bytes(), &req); err != nil {
-			return nil, nil, err
-		}
-		res, err := sender.ReplicationCursor(ctx, &req)
-		if err != nil {
-			return nil, nil, err
-		}
-		b, err := proto.Marshal(res)
-		if err != nil {
-			return nil, nil, err
-		}
-		return bytes.NewBuffer(b), nil, nil
-
-	}
-Err:
-	return nil, nil, errors.New("no handler for given endpoint")
 }

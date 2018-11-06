@@ -2,12 +2,12 @@ syntax = "proto3";
 option go_package = "pdu";
 
 service ReplicationServer {
-    rpc ListFilesystems(ListFilesystemReq) returns (ListFilesystemRes);
-    rpc ListFilesystemVersions(ListFilesystemVersionsReq) returns (ListFilesystemVersionsRes);
-    rpc DestroySnapshots(DestroySnapshotsReq) returns (DestroySnapshotsRes);
-    rpc ReplicationCursor(ReplicationCursorReq) returns (ReplicationCursorRes);
-    rpc Send(SendReq) returns (SendRes);
-    rpc Receive(ReceiveReq) returns (ReceiveRes);
+    rpc ListFilesystems (ListFilesystemReq) returns (ListFilesystemRes);
+    rpc ListFilesystemVersions (ListFilesystemVersionsReq) returns (ListFilesystemVersionsRes);
+    rpc DestroySnapshots (DestroySnapshotsReq) returns (DestroySnapshotsRes);
+    rpc ReplicationCursor (ReplicationCursorReq) returns (ReplicationCursorRes);
+    rpc GetSendToken (SendTokenReq) returns (SendTokenRes);
+    rpc GetReceiveToken (ReceiveTokenReq) returns (ReceiveTokenRes);
 }
 
 message ListFilesystemReq {}
@@ -42,7 +42,7 @@ message FilesystemVersion {
 }
 
 
-message SendReq {
+message SendTokenReq {
     string Filesystem  = 1;
     string From = 2;
     // May be empty / null to request a full transfer of From
@@ -67,7 +67,7 @@ message Property {
     string Value = 2;
 }
 
-message SendRes {
+message SendTokenRes {
     // The actual stream is sent over antoher mechanism.
     // The client passes the following otken via that mechanism to restore context on the sender.
     string SendToken = 1;
@@ -82,7 +82,7 @@ message SendRes {
     repeated Property Properties = 4;
 }
 
-message ReceiveReq {
+message ReceiveTokenReq {
     // The stream part of the streamrpc request contains the zfs send stream
     string Filesystem = 1; // FIXME should be snapshot name, we can enforce that on recv
 
@@ -90,7 +90,7 @@ message ReceiveReq {
     bool ClearResumeToken = 2;
 }
 
-message ReceiveRes {
+message ReceiveTokenRes {
     // The actual stream is sent over antoher mechanism.
     // The client passes the following otken via that mechanism to restore context on the sender.
     string ReceiveToken = 1;
