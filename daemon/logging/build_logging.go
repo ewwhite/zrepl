@@ -6,7 +6,6 @@ import (
 	"crypto/x509"
 	"github.com/mattn/go-isatty"
 	"github.com/pkg/errors"
-	"github.com/problame/go-streamrpc"
 	"github.com/zrepl/zrepl/config"
 	"github.com/zrepl/zrepl/daemon/pruner"
 	"github.com/zrepl/zrepl/endpoint"
@@ -62,13 +61,11 @@ func OutletsFromConfig(in config.LoggingOutletEnumList) (*logger.Outlets, error)
 
 const (
 	SubsysReplication = "repl"
-	SubsysStreamrpc   = "rpc"
 	SubsyEndpoint     = "endpoint"
 )
 
 func WithSubsystemLoggers(ctx context.Context, log logger.Logger) context.Context {
 	ctx = replication.WithLogger(ctx, log.WithField(SubsysField, "repl"))
-	ctx = streamrpc.ContextWithLogger(ctx, streamrpcLogAdaptor{log.WithField(SubsysField, "rpc")})
 	ctx = endpoint.WithLogger(ctx, log.WithField(SubsysField, "endpoint"))
 	ctx = pruner.WithLogger(ctx, log.WithField(SubsysField, "pruning"))
 	ctx = snapper.WithLogger(ctx, log.WithField(SubsysField, "snapshot"))

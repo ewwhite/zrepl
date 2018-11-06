@@ -64,11 +64,6 @@ ignored = [ "github.com/inconshreveable/mousetrap" ]
   name = "github.com/fatih/color"
   version = "1.7.0"
 
-[[constraint]]
-  name = "github.com/problame/go-streamrpc"
-  version = "0.5.0"
-
-
 
 [[constraint]]
   name = "github.com/gdamore/tcell"

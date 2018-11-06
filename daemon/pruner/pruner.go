@@ -11,7 +11,6 @@ import (
 	"github.com/zrepl/zrepl/replication/pdu"
 	"github.com/zrepl/zrepl/util/envconst"
 	"github.com/zrepl/zrepl/util/watchdog"
-	"github.com/problame/go-streamrpc"
 	"net"
 	"sort"
 	"strings"
@@ -349,7 +348,6 @@ type Error interface {
 }
 
 var _ Error = net.Error(nil)
-var _ Error = streamrpc.Error(nil)
 
 func shouldRetry(e error) bool {
 	if neterr, ok := e.(net.Error); ok {

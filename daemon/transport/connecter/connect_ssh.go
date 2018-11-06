@@ -5,7 +5,6 @@ import (
 	"github.com/jinzhu/copier"
 	"github.com/pkg/errors"
 	"github.com/problame/go-netssh"
-	"github.com/problame/go-streamrpc"
 	"github.com/zrepl/zrepl/config"
 	"net"
 	"time"
@@ -21,8 +20,6 @@ type SSHStdinserverConnecter struct {
 	Options              []string
 	dialTimeout          time.Duration
 }
-
-var _ streamrpc.Connecter = &SSHStdinserverConnecter{}
 
 func SSHStdinserverConnecterFromConfig(in *config.SSHStdinserverConnect) (c *SSHStdinserverConnecter, err error) {
 

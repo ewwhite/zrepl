@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"github.com/pkg/errors"
-	"github.com/problame/go-streamrpc"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/zrepl/zrepl/config"
 	"github.com/zrepl/zrepl/daemon/filters"
@@ -27,7 +26,6 @@ type PassiveSide struct {
 	tokenStore *tokenstore.Store
 	tokenStoreStop tokenstore.StopExpirationFunc
 
-	rpcConf  *streamrpc.ConnConfig
 }
 
 type passiveMode interface {
