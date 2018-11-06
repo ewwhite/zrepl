@@ -8,13 +8,13 @@ import (
 	"github.com/pkg/errors"
 	"github.com/zrepl/zrepl/config"
 	"github.com/zrepl/zrepl/daemon/pruner"
+	"github.com/zrepl/zrepl/daemon/snapper"
+	"github.com/zrepl/zrepl/daemon/transport/serve"
 	"github.com/zrepl/zrepl/endpoint"
 	"github.com/zrepl/zrepl/logger"
 	"github.com/zrepl/zrepl/replication"
 	"github.com/zrepl/zrepl/tlsconf"
 	"os"
-	"github.com/zrepl/zrepl/daemon/snapper"
-	"github.com/zrepl/zrepl/daemon/transport/serve"
 )
 
 func OutletsFromConfig(in config.LoggingOutletEnumList) (*logger.Outlets, error) {

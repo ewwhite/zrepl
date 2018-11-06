@@ -130,7 +130,7 @@ type Global struct {
 	Monitoring []MonitoringEnum       `yaml:"monitoring,optional"`
 	Control    *GlobalControl         `yaml:"control,optional,fromdefaults"`
 	Serve      *GlobalServe           `yaml:"serve,optional,fromdefaults"`
-	RPC        *RPCConfig             `yaml:"rpc,optional,fromdefaults"`
+	RPC        *RPCConnectConfig      `yaml:"rpc,optional,fromdefaults"`
 }
 
 func Default(i interface{}) {
@@ -145,7 +145,7 @@ func Default(i interface{}) {
 	}
 }
 
-type RPCConfig struct {
+type RPCConnectConfig struct {
 	Timeout             time.Duration `yaml:"timeout,optional,positive,default=10s"`
 }
 
@@ -154,8 +154,8 @@ type ConnectEnum struct {
 }
 
 type ConnectCommon struct {
-	Type string     `yaml:"type"`
-	RPC  *RPCConfig `yaml:"rpc,optional"`
+	Type string            `yaml:"type"`
+	RPC  *RPCConnectConfig `yaml:"rpc,optional"`
 }
 
 type TCPConnect struct {
@@ -196,9 +196,13 @@ type ServeEnum struct {
 	Ret interface{}
 }
 
+type RPCServerConfig struct {
+	Timeout             time.Duration `yaml:"timeout,optional,positive,default=10s"`
+}
+
 type ServeCommon struct {
-	Type string     `yaml:"type"`
-	RPC  *RPCConfig `yaml:"rpc,optional"`
+	Type string            `yaml:"type"`
+	RPC  *RPCServerConfig  `yaml:"rpc,optional"`
 }
 
 type TCPServe struct {

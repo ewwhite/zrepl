@@ -9,6 +9,7 @@ import (
 	"github.com/zrepl/zrepl/replication"
 	"github.com/zrepl/zrepl/replication/pdu"
 	"github.com/zrepl/zrepl/util/envconst"
+	"github.com/zrepl/zrepl/util/keepaliveio"
 	"github.com/zrepl/zrepl/zfs"
 	"io"
 	"net/http"
@@ -487,18 +488,30 @@ func (s *HttpHandler) handleSendRecv(mode int, w http.ResponseWriter, r *http.Re
 	// decode token from URL
 	token := path.Base(r.URL.Path)
 
+	// we use keepaliveio because net/http does not allow proper idle timeouts
+	// but we can't afford to keep the `zfs recv` or `zfs send` open until KeepAlive detection hits
+	//
+	// see "About Streaming" in https://blog.cloudflare.com/the-complete-guide-to-golang-net-http-timeouts/
+	// and https://github.com/golang/go/issues/16100
+	// for details
+
 	switch mode {
 	default:
 		panic(fmt.Sprintf("implementation error: unknown mode %d", mode))
-	case 0:
-		stream, err := s.srv.DoSend(r.Context(), token)
+	case 0: // send
+		ctx, stream, err := keepaliveio.NewKeepaliveReadCloser(r.Context(), 10*time.Second, func(ctx context.Context) (io.ReadCloser, error) {
+			return s.srv.DoSend(ctx, token)
+		})
 		if err != nil {
 			// TODO classify error as server or client side
 			w.WriteHeader(500)
 			fmt.Fprintf(w, "%s", err)
 		} else {
 			w.WriteHeader(200)
-			_, err := io.Copy(w, stream)
+			_, writer, _ := keepaliveio.KeepaliveWriter(ctx, 10*time.Second, func(ctx context.Context) (io.Writer, error) { // FIXME constant
+				return w, nil
+			}) // can ignore err because constructor always returns nil
+			_, err := io.Copy(writer, stream)
 			// this error could be on the receiving side, network related, or our side
 			// thus, we should log it
 			if err != nil {
@@ -506,14 +519,26 @@ func (s *HttpHandler) handleSendRecv(mode int, w http.ResponseWriter, r *http.Re
 			}
 		}
 	case 1:
-		err := s.srv.DoReceive(r.Context(), token, r.Body)
+		timeout := 10 * time.Second
+		ctx, stream, _ := keepaliveio.NewKeepaliveReadCloser(r.Context(), timeout, func(ctx context.Context) (io.ReadCloser, error) {
+			return r.Body, nil
+		})
+		err := s.srv.DoReceive(ctx, token, stream)
+		if stream.TimedOut() {
+			err = fmt.Errorf("receive aborted after due to client keepalive timeout")
+			getLogger(ctx).WithField("timeout", timeout).
+				Error("receive aborted due to client keepalive timeout")
+		}
+		_, writer, _ := keepaliveio.KeepaliveWriter(ctx, timeout, func(ctx context.Context) (io.Writer, error) {
+			return w, nil
+		})
 		if err != nil {
 			// TODO classify error as server or client side
 			w.WriteHeader(500)
-			fmt.Fprintf(w , "%s", err)
+			fmt.Fprintf(writer , "%s", err)
 		} else {
 			w.WriteHeader(200)
-			fmt.Fprintf(w, "transfer successful")
+			fmt.Fprintf(writer, "transfer successful")
 		}
 	}
 }
@@ -543,7 +568,10 @@ var _ replication.Receiver = &HttpClient{}
 
 func NewClient(transport *http.Transport) *HttpClient {
 	twirpHttpClient := http.Client{Transport: transport}
-	bulkTransferClient := http.Client{Transport: transport}
+	bulkTransferClient := http.Client{
+		Timeout: 0,
+		Transport: transport,
+	}
 	c := &HttpClient{
 		transport: transport,
 		twirpHttpClient: twirpHttpClient,
