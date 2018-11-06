@@ -144,14 +144,13 @@ func (c *IOCommand) Write(buf []byte) (n int, err error) {
 // Terminate the child process and collect its exit status
 // It is safe to call Close() multiple times.
 func (c *IOCommand) Close() (err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), envconst.Duration("IOCOMMAND_TIMEOUT", 10*time.Second))
-	defer cancel()
 	if c.Cmd.ProcessState == nil {
 		// racy...
 		err = syscall.Kill(c.Cmd.Process.Pid, syscall.SIGTERM)
+		ctx, cancel := context.WithTimeout(context.Background(), envconst.Duration("IOCOMMAND_TIMEOUT", 10*time.Second))
+		defer cancel()
 		return c.doWait(ctx)
 	} else {
-		c.doWait(ctx)
 		return c.ExitResult.Error
 	}
 }
