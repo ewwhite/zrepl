@@ -18,7 +18,6 @@ import (
 	"github.com/zrepl/zrepl/replication"
 	"github.com/zrepl/zrepl/util/envconst"
 	"github.com/zrepl/zrepl/zfs"
-	"net/http"
 	"sync"
 	"time"
 )
@@ -84,7 +83,7 @@ func (a *ActiveSide) updateTasks(u func(*activeSideTasks)) activeSideTasks {
 }
 
 type activeMode interface {
-	SenderReceiver(tokenStore endpoint.TokenStore, transport *http.Transport, clientConfig endpoint.HttpClientConfig) (replication.Sender, replication.Receiver)
+	SenderReceiver(tokenStore endpoint.TokenStore, dialFunc endpoint.DialContextFunc, clientConfig endpoint.HttpClientConfig) (replication.Sender, replication.Receiver)
 	Type() Type
 	RunPeriodic(ctx context.Context, wakeUpCommon chan<- struct{})
 }
@@ -94,9 +93,9 @@ type modePush struct {
 	snapper *snapper.PeriodicOrManual
 }
 
-func (m *modePush) SenderReceiver(tokenStore endpoint.TokenStore, transport *http.Transport, clientConfig endpoint.HttpClientConfig) (replication.Sender, replication.Receiver) {
+func (m *modePush) SenderReceiver(tokenStore endpoint.TokenStore, dialFunc endpoint.DialContextFunc, clientConfig endpoint.HttpClientConfig) (replication.Sender, replication.Receiver) {
 	sender := endpoint.NewSender(m.fsfilter, tokenStore)
-	receiver := endpoint.NewClient(transport, clientConfig)
+	receiver := endpoint.NewClient(dialFunc, clientConfig)
 	return endpoint.NewLocal(sender), receiver
 }
 
@@ -127,8 +126,8 @@ type modePull struct {
 	interval time.Duration
 }
 
-func (m *modePull) SenderReceiver(tokenStore endpoint.TokenStore, transport *http.Transport, clientConfig endpoint.HttpClientConfig) (replication.Sender, replication.Receiver) {
-	sender := endpoint.NewClient(transport, clientConfig)
+func (m *modePull) SenderReceiver(tokenStore endpoint.TokenStore, dialFunc endpoint.DialContextFunc, clientConfig endpoint.HttpClientConfig) (replication.Sender, replication.Receiver) {
+	sender := endpoint.NewClient(dialFunc, clientConfig)
 	receiver := endpoint.NewReceiver(m.rootFS, tokenStore)
 	return sender, endpoint.NewLocal(receiver)
 }
