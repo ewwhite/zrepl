@@ -115,6 +115,7 @@ func DoHandshakeVersion(conn net.Conn, deadline time.Time, version int) error {
 		return fmt.Errorf("could not encode protocol banner: %s", err)
 	}
 
+	defer conn.SetDeadline(time.Time{})
 	conn.SetDeadline(deadline)
 	_, err = io.Copy(conn, bytes.NewBuffer(hsb))
 	if err != nil {
