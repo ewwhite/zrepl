@@ -71,14 +71,14 @@ jobs:
 	assert.Equal(t, uint32(0xabcd), conf.Jobs[1].Ret.(*PullJob).Connect.Ret.(*TCPConnect).RPC.TxChunkSize)
 	assert.Equal(t, uint32(0x2342), conf.Jobs[2].Ret.(*SinkJob).Serve.Ret.(*TCPServe).RPC.RxStructuredMaxLen)
 	assert.Equal(t, 10*time.Second, conf.Jobs[3].Ret.(*SinkJob).Serve.Ret.(*TCPServe).RPC.SendHeartbeatInterval)
-	defConf := RPCConfig{}
+	defConf := RPCConnectConfig{}
 	Default(&defConf)
 	assert.Equal(t, defConf.Timeout, conf.Global.RPC.Timeout)
 }
 
 func TestGlobal_DefaultRPCConfig(t *testing.T) {
 	assert.NotPanics(t, func() {
-		var c RPCConfig
+		var c RPCConnectConfig
 		Default(&c)
 		assert.NotNil(t, c)
 		assert.Equal(t, c.TxChunkSize, uint32(1)<<15)
