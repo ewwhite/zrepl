@@ -13,6 +13,7 @@ import (
 	"github.com/zrepl/zrepl/util/keepaliveio"
 	"github.com/zrepl/zrepl/zfs"
 	"io"
+	"net"
 	"net/http"
 	"path"
 	"strings"
@@ -607,7 +608,6 @@ func (s *HttpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // for a remote instance of ReplicationServer
 type HttpClient struct {
 	config          *HttpClientConfig
-	transport       *http.Transport
 	twirpHttpClient http.Client
 	sendClient      http.Client
 	recvClient 		http.Client
@@ -645,31 +645,37 @@ var _ replication.Endpoint = &HttpClient{}
 var _ replication.Sender = &HttpClient{}
 var _ replication.Receiver = &HttpClient{}
 
+
+type DialContextFunc = func(ctx context.Context, network string, addr string) (net.Conn, error)
+
 // config must be validated, NewClient will panic if it is not valid
-func NewClient(transport *http.Transport, config HttpClientConfig) *HttpClient {
+func NewClient(dialFunc DialContextFunc, config HttpClientConfig) *HttpClient {
 	if err := config.Validate(); err != nil {
 		panic(fmt.Errorf("client config invalid: %s", err))
 	}
 	twirpHttpClient := http.Client{
 		Timeout: config.RPCCallTimeout, // full request timeout
-		Transport: transport,
+		Transport: &http.Transport{
+			DialContext: dialFunc,
+		},
 	}
-	var sendTransport http.Transport = *transport
-	sendTransport.ResponseHeaderTimeout = config.RPCCallTimeout
 	sendClient := http.Client{
 		Timeout: 0, // can't do full request timeouts, we use package keepaliveio
-		Transport: &sendTransport,
+		Transport: &http.Transport{
+			DialContext: dialFunc,
+			ResponseHeaderTimeout: config.RPCCallTimeout,
+		},
 	}
-	var recvTransport http.Transport = *transport
-	// do _not_ use any header timeout here since the Post takes arbitrarily long (rely on keepaliveio on local zfs send instead)
 	recvClient := http.Client{
 		Timeout: 0, // can't do full request timeouts, we use package keepaliveio
-		Transport: &recvTransport,
+		Transport: &http.Transport{
+			DialContext: dialFunc,
+			// do _not_ use any header timeout here since the Post takes arbitrarily long (rely on keepaliveio on local zfs send instead)
+		},
 	}
 
 	c := &HttpClient{
 		config:          &config,
-		transport:       transport,
 		twirpHttpClient: twirpHttpClient,
 		sendClient:      sendClient,
 		recvClient: 	 recvClient,

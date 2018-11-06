@@ -20,11 +20,12 @@ func ClientIdentity(ctx context.Context) string {
 	return s
 }
 
-func ClientTransport(connecter connecter.Connecter) *http.Transport {
-	return &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+// FIXME ciruclare dependency package endpoint
+type DialContextFunc = func(ctx context.Context, network string, addr string) (net.Conn, error)
+
+func ClientTransport(connecter connecter.Connecter)  DialContextFunc {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return connecter.Connect(ctx)
-		},
 	}
 }
 
@@ -48,7 +49,7 @@ type Server struct {
 	s http.Server
 }
 
-func (srv Server) Serve(ctx context.Context) error {
+func (srv *Server) Serve(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
 		srv.l.Close()
