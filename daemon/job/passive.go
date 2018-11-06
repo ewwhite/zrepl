@@ -2,6 +2,7 @@ package job
 
 import (
 	"context"
+	"fmt"
 	"github.com/pkg/errors"
 	"github.com/problame/go-streamrpc"
 	"github.com/prometheus/client_golang/prometheus"
@@ -10,31 +11,35 @@ import (
 	"github.com/zrepl/zrepl/daemon/logging"
 	"github.com/zrepl/zrepl/daemon/transport/serve"
 	"github.com/zrepl/zrepl/daemon/snapper"
+	"github.com/zrepl/zrepl/daemon/transport/transporthttpinjector"
 	"github.com/zrepl/zrepl/endpoint"
 	"github.com/zrepl/zrepl/zfs"
+	"net/http"
 	"path"
 )
 
 type PassiveSide struct {
 	mode passiveMode
 	name     string
-	l        serve.ListenerFactory
+	l        serve.AuthenticatedListener
 	rpcConf  *streamrpc.ConnConfig
 }
 
 type passiveMode interface {
-	ConnHandleFunc(ctx context.Context, conn serve.AuthenticatedConn) streamrpc.HandlerFunc
+	Handler() http.Handler
 	RunPeriodic(ctx context.Context)
 	Type() Type
 }
 
 type modeSink struct {
+	tokenStore endpoint.TokenStore
 	rootDataset *zfs.DatasetPath
 }
 
 func (m *modeSink) Type() Type { return TypeSink }
 
-func (m *modeSink) ConnHandleFunc(ctx context.Context, conn serve.AuthenticatedConn) streamrpc.HandlerFunc {
+func (m *modeSink) Handler(ctx context.Context) http.Handler {
+
 	log := GetLogger(ctx)
 
 	clientRootStr := path.Join(m.rootDataset.ToString(), conn.ClientIdentity())
@@ -46,11 +51,7 @@ func (m *modeSink) ConnHandleFunc(ctx context.Context, conn serve.AuthenticatedC
 	}
 	log.WithField("client_root", clientRoot).Debug("client root")
 
-	local, err := endpoint.NewReceiver(clientRoot)
-	if err != nil {
-		log.WithError(err).Error("unexpected error: cannot convert mapping to filter")
-		return nil
-	}
+	local :=  endpoint.NewReceiver(clientRoot)
 
 	h := endpoint.NewHandler(local)
 	return h.Handle
@@ -128,69 +129,21 @@ func (j *PassiveSide) Run(ctx context.Context) {
 	log := GetLogger(ctx)
 	defer log.Info("job exiting")
 
-	l, err := j.l.Listen()
-	if err != nil {
-		log.WithError(err).Error("cannot listen")
-		return
-	}
-	defer l.Close()
-
 	{
 		ctx, cancel := context.WithCancel(logging.WithSubsystemLoggers(ctx, log)) // shadowing
 		defer cancel()
 		go j.mode.RunPeriodic(ctx)
 	}
 
-	log.WithField("addr", l.Addr()).Debug("accepting connections")
-	var connId int
-outer:
-	for {
-
-		select {
-		case res := <-accept(ctx, l):
-			if res.err != nil {
-				log.WithError(res.err).Info("accept error")
-				continue
-			}
-			conn := res.conn
-			connId++
-			connLog := log.
-				WithField("connID", connId)
-			connLog.
-				WithField("addr", conn.RemoteAddr()).
-				WithField("client_identity", conn.ClientIdentity()).
-				Info("handling connection")
-			go func() {
-				defer connLog.Info("finished handling connection")
-				defer conn.Close()
-				ctx := logging.WithSubsystemLoggers(ctx, connLog)
-				handleFunc := j.mode.ConnHandleFunc(ctx, conn)
-				if handleFunc == nil {
-					return
-				}
-				if err := streamrpc.ServeConn(ctx, conn, j.rpcConf, handleFunc); err != nil {
-					log.WithError(err).Error("error serving client")
-				}
-			}()
-
-		case <-ctx.Done():
-			break outer
-		}
-
+	handler := j.mode.Handler()
+	if handler == nil {
+		panic(fmt.Sprintf("implementation error: j.mode.Handler() returned nil: %#v", l))
 	}
 
-}
-
-type acceptResult struct {
-	conn serve.AuthenticatedConn
-	err  error
-}
-
-func accept(ctx context.Context, listener serve.AuthenticatedListener) <-chan acceptResult {
-	c := make(chan acceptResult, 1)
-	go func() {
-		conn, err := listener.Accept(ctx)
-		c <- acceptResult{conn, err}
-	}()
-	return c
+	server := transporthttpinjector.NewServer(j.l, handler)
+	if err := server.Serve(ctx); err != nil {
+		if err != context.Canceled {
+			log.WithError(err).Error("error serving")
+		}
+	}
 }

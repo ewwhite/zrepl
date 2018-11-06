@@ -74,7 +74,7 @@ type TCPAuthListener struct {
 	clientMap *ipMap
 }
 
-func (f *TCPAuthListener) Accept(ctx context.Context) (AuthenticatedConn, error) {
+func (f *TCPAuthListener) Accept(ctx context.Context) (*AuthConn, error) {
 	nc, err := f.TCPListener.Accept()
 	if err != nil {
 		return nil, err
@@ -86,6 +86,6 @@ func (f *TCPAuthListener) Accept(ctx context.Context) (AuthenticatedConn, error)
 		nc.Close()
 		return nil, err
 	}
-	return authConn{nc, clientIdent}, nil
+	return &AuthConn{nc, clientIdent}, nil
 }
 

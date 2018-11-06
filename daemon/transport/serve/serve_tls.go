@@ -66,7 +66,7 @@ type tlsAuthListener struct {
 	clientCNs map[string]struct{}
 }
 
-func (l tlsAuthListener) Accept(ctx context.Context) (AuthenticatedConn, error) {
+func (l tlsAuthListener) Accept(ctx context.Context) (*AuthConn, error) {
 	c, cn, err := l.ClientAuthListener.Accept()
 	if err != nil {
 		return nil, err
@@ -77,7 +77,7 @@ func (l tlsAuthListener) Accept(ctx context.Context) (AuthenticatedConn, error) 
 		}
 		return nil, fmt.Errorf("unauthorized client common name %q from %s", cn, c.RemoteAddr())
 	}
-	return authConn{c, cn}, nil
+	return &AuthConn{c, cn}, nil
 }
 
 

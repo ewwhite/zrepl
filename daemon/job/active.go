@@ -3,7 +3,6 @@ package job
 import (
 	"context"
 	"github.com/pkg/errors"
-	"github.com/problame/go-streamrpc"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/zrepl/zrepl/config"
 	"github.com/zrepl/zrepl/daemon/filters"
@@ -13,8 +12,10 @@ import (
 	"github.com/zrepl/zrepl/daemon/pruner"
 	"github.com/zrepl/zrepl/daemon/snapper"
 	"github.com/zrepl/zrepl/daemon/transport/connecter"
+	"github.com/zrepl/zrepl/daemon/transport/transporthttpinjector"
 	"github.com/zrepl/zrepl/endpoint"
 	"github.com/zrepl/zrepl/replication"
+	"github.com/zrepl/zrepl/replication/pdu"
 	"github.com/zrepl/zrepl/util/envconst"
 	"github.com/zrepl/zrepl/zfs"
 	"sync"
@@ -24,7 +25,7 @@ import (
 type ActiveSide struct {
 	mode          activeMode
 	name          string
-	clientFactory *connecter.ClientFactory
+	connecter	  connecter.Connecter
 
 	prunerFactory *pruner.PrunerFactory
 
@@ -77,7 +78,7 @@ func (a *ActiveSide) updateTasks(u func(*activeSideTasks)) activeSideTasks {
 }
 
 type activeMode interface {
-	SenderReceiver(client *streamrpc.Client) (replication.Sender, replication.Receiver, error)
+	SenderReceiver(client pdu.HTTPClient) (replication.Sender, replication.Receiver)
 	Type() Type
 	RunPeriodic(ctx context.Context, wakeUpCommon chan<- struct{})
 }
@@ -87,10 +88,10 @@ type modePush struct {
 	snapper *snapper.PeriodicOrManual
 }
 
-func (m *modePush) SenderReceiver(client *streamrpc.Client) (replication.Sender, replication.Receiver, error) {
+func (m *modePush) SenderReceiver(client pdu.HTTPClient) (replication.Sender, replication.Receiver) {
 	sender := endpoint.NewSender(m.fsfilter)
-	receiver := endpoint.NewRemote(client)
-	return sender, receiver, nil
+	receiver := endpoint.NewClient(client)
+	return sender, receiver
 }
 
 func (m *modePush) Type() Type { return TypePush }
@@ -120,10 +121,10 @@ type modePull struct {
 	interval time.Duration
 }
 
-func (m *modePull) SenderReceiver(client *streamrpc.Client) (replication.Sender, replication.Receiver, error) {
-	sender := endpoint.NewRemote(client)
-	receiver, err := endpoint.NewReceiver(m.rootFS)
-	return sender, receiver, err
+func (m *modePull) SenderReceiver(client pdu.HTTPClient) (replication.Sender, replication.Receiver) {
+	sender := endpoint.NewClient(client)
+	receiver := endpoint.NewReceiver(m.rootFS)
+	return sender, receiver
 }
 
 func (*modePull) Type() Type { return TypePull }
@@ -185,7 +186,7 @@ func activeSide(g *config.Global, in *config.ActiveJob, mode activeMode) (j *Act
 		ConstLabels: prometheus.Labels{"zrepl_job":j.name},
 	}, []string{"filesystem"})
 
-	j.clientFactory, err = connecter.FromConfig(g, in.Connect)
+	j.connecter, err = connecter.FromConfig(g, in.Connect)
 	if err != nil {
 		return nil, errors.Wrap(err, "cannot build client")
 	}
@@ -353,13 +354,8 @@ func (j *ActiveSide) do(ctx context.Context) {
 		}
 	}()
 
-	client, err := j.clientFactory.NewClient()
-	if err != nil {
-		log.WithError(err).Error("factory cannot instantiate streamrpc client")
-	}
-	defer client.Close(ctx)
-
-	sender, receiver, err := j.mode.SenderReceiver(client)
+	client := transporthttpinjector.Client(j.connecter)
+	sender, receiver := j.mode.SenderReceiver(client)
 
 	{
 		select {

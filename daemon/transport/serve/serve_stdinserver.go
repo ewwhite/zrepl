@@ -44,7 +44,7 @@ func (f *multiStdinserverListenerFactory) Listen() (AuthenticatedListener, error
 }
 
 type multiStdinserverAcceptRes struct {
-	conn AuthenticatedConn
+	conn *AuthConn
 	err error
 }
 
@@ -78,7 +78,7 @@ func multiStdinserverListenerFromClientIdentities(sockdir string, cis []string) 
 	return &MultiStdinserverListener{listeners: listeners}, nil
 }
 
-func (m *MultiStdinserverListener) Accept(ctx context.Context) (AuthenticatedConn, error){
+func (m *MultiStdinserverListener) Accept(ctx context.Context) (*AuthConn, error){
 
 	if m.accepts == nil {
 		m.accepts = make(chan multiStdinserverAcceptRes, len(m.listeners))
@@ -122,12 +122,12 @@ func (l stdinserverListener) Addr() net.Addr {
 	return netsshAddr{}
 }
 
-func (l stdinserverListener) Accept(ctx context.Context) (AuthenticatedConn, error) {
+func (l stdinserverListener) Accept(ctx context.Context) (*AuthConn, error) {
 	c, err := l.l.Accept()
 	if err != nil {
 		return nil, err
 	}
-	return netsshConnToNetConnAdatper{c, l.clientIdentity}, nil
+	return &AuthConn{netsshConnToNetConnAdatper{c}, l.clientIdentity}, nil
 }
 
 func (l stdinserverListener) Close() (err error) {
@@ -141,10 +141,7 @@ func (netsshAddr) String() string  { return "???" }
 
 type netsshConnToNetConnAdatper struct {
 	io.ReadWriteCloser // works for both netssh.SSHConn and netssh.ServeConn
-	clientIdentity string
 }
-
-func (a netsshConnToNetConnAdatper) ClientIdentity() string { return a.clientIdentity }
 
 func (netsshConnToNetConnAdatper) LocalAddr() net.Addr { return netsshAddr{} }
 

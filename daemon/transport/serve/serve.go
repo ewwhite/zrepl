@@ -1,6 +1,7 @@
 package serve
 
 import (
+	"fmt"
 	"github.com/pkg/errors"
 	"github.com/zrepl/zrepl/config"
 	"github.com/zrepl/zrepl/daemon/transport"
@@ -30,12 +31,6 @@ func getLogger(ctx context.Context) Logger {
 	return logger.NewNullLogger()
 }
 
-type AuthenticatedConn interface {
-	net.Conn
-	// ClientIdentity must be a string that satisfies ValidateClientIdentity
-	ClientIdentity() string
-}
-
 // A client identity must be a single component in a ZFS filesystem path
 func ValidateClientIdentity(in string) (err error) {
 	path, err := zfs.NewDatasetPath(in)
@@ -48,24 +43,47 @@ func ValidateClientIdentity(in string) (err error) {
 	return nil
 }
 
-type authConn struct {
+type AuthConn struct {
 	net.Conn
 	clientIdentity string
 }
 
-var _ AuthenticatedConn = authConn{}
-
-func (c authConn) ClientIdentity() string {
+func (c *AuthConn) ClientIdentity() string {
 	if err := ValidateClientIdentity(c.clientIdentity); err != nil {
 		panic(err)
 	}
 	return c.clientIdentity
 }
 
+type AuthRemoteAddr struct {
+	ClientIdentity string
+}
+
+func (AuthRemoteAddr) Network() string {
+	return "AuthConn"
+}
+
+func (a AuthRemoteAddr) String() string {
+	return fmt.Sprintf("AuthRemoteAddr{ClientIdentity:%q}", a.ClientIdentity)
+}
+
+func (a *AuthRemoteAddr) FromString(s string) error {
+	_, err := fmt.Sscanf(s, "AuthRemoteAddr{ClientIdentity:%q}", &a.ClientIdentity)
+	if err != nil {
+		return fmt.Errorf("could not decode string-encoded AuthRemoteAddr: %s", err)
+	}
+	return nil
+}
+
+// override remote addr
+func (c *AuthConn) RemoteAddr() net.Addr {
+	return AuthRemoteAddr{c.clientIdentity}
+}
+
 // like net.Listener, but with an AuthenticatedConn instead of net.Conn
 type AuthenticatedListener interface {
 	Addr() (net.Addr)
-	Accept(ctx context.Context) (AuthenticatedConn, error)
+	Accept(ctx context.Context) (*AuthConn, error)
 	Close() error
 }
 
@@ -93,7 +111,7 @@ func (l HandshakeListener) Addr() (net.Addr) { return l.l.Addr() }
 
 func (l HandshakeListener) Close() error { return l.l.Close() }
 
-func (l HandshakeListener) Accept(ctx context.Context) (AuthenticatedConn, error) {
+func (l HandshakeListener) Accept(ctx context.Context) (*AuthConn, error) {
 	conn, err := l.l.Accept(ctx)
 	if err != nil {
 		return nil, err
@@ -144,4 +162,6 @@ func FromConfig(g *config.Global, in config.ServeEnum) (lf ListenerFactory, conf
 
 }
 
+type AuthenticatedHTTPProxy struct {
 
+}

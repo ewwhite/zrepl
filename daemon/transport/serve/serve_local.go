@@ -89,14 +89,7 @@ func (a localAddr) String() string { return a.S }
 
 func (l *LocalListener) Addr() (net.Addr) { return localAddr{"<listening>"} }
 
-type localConn struct {
-	net.Conn
-	clientIdentity string
-}
-
-func (l localConn) ClientIdentity() string { return l.clientIdentity }
-
-func (l *LocalListener) Accept(ctx context.Context) (AuthenticatedConn, error) {
+func (l *LocalListener) Accept(ctx context.Context) (*AuthConn, error) {
 	respondToRequest := func(req connectRequest, res connectResult) (err error) {
 		getLogger(ctx).
 			WithField("res.conn", res.conn).WithField("res.err", res.err).
@@ -157,7 +150,7 @@ func (l *LocalListener) Accept(ctx context.Context) (AuthenticatedConn, error) {
 		return nil, err
 	}
 
-	return localConn{right, req.clientIdentity}, nil
+	return &AuthConn{right, req.clientIdentity}, nil
 }
 
 func (l *LocalListener) Close() error {

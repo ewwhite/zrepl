@@ -10,6 +10,7 @@ import (
 	"github.com/zrepl/zrepl/util/envconst"
 	"github.com/zrepl/zrepl/zfs"
 	"io"
+	"net"
 	"net/http"
 	"path"
 	"strings"
@@ -189,11 +190,11 @@ type Receiver struct {
 
 var _ ReplicationServer = &Receiver{}
 
-func NewReceiver(rootDataset *zfs.DatasetPath, tokenStore TokenStore) (*Receiver, error) {
+func NewReceiver(rootDataset *zfs.DatasetPath, tokenStore TokenStore) (*Receiver) {
 	if rootDataset.Length() <= 0 {
-		return nil, errors.New("root dataset must not be an empty path")
+		panic(fmt.Sprintf("root dataset must not be an empty path: %v", rootDataset))
 	}
-	return &Receiver{root: rootDataset.Copy(), tokenStore: tokenStore}, nil
+	return &Receiver{root: rootDataset.Copy(), tokenStore: tokenStore}
 }
 
 type subroot struct {
@@ -428,7 +429,7 @@ func init() {
 	}
 }
 
-func NewServer(srv ReplicationServer) *HttpServer {
+func NewServer(listener net.Listener, srv ReplicationServer) *HttpServer {
 	s := &HttpServer{
 		mux: http.NewServeMux(),
 		srv: srv,
@@ -441,6 +442,14 @@ func NewServer(srv ReplicationServer) *HttpServer {
 	s.mux.HandleFunc(DoReceivePathPrefix, func(w http.ResponseWriter, r *http.Request) {
 		s.handleSendRecv(1, w, r)
 	})
+
+	httpServer := http.Server{
+		// TODO ErrorLog
+		Handler: s.mux,
+	}
+	httpServer.Serve(listener)
+
+
 	return s
 }
 
@@ -486,14 +495,28 @@ func (s *HttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // Client implements the interfaces required by package replication
 type Client struct {
-	baseURL string
-	client http.Client // TODO ideally, the same client as pdu.ReplicationServer ?
-	pdu.ReplicationServer // the client instance
+	transport *http.Transport
+	twirpHttpClient    http.Client
+	bulkTransferClient http.Client
+
+	pdu.ReplicationServer // this the twirp client instance, see constructor
 }
 
 var _ replication.Endpoint = &Client{}
 var _ replication.Sender = &Client{}
 var _ replication.Receiver = &Client{}
+
+func NewClient(transport *http.Transport) *Client {
+	twirpHttpClient := http.Client{Transport: transport}
+	bulkTransferClient := http.Client{Transport: transport}
+	c := &Client{
+		transport: transport,
+		twirpHttpClient: twirpHttpClient,
+		bulkTransferClient: bulkTransferClient,
+	}
+	c.ReplicationServer = pdu.NewReplicationServerProtobufClient("/", &c.twirpHttpClient) // '/' could be anything
+	return c
+}
 
 func (c *Client) Send(ctx context.Context, r *pdu.SendTokenReq) (*pdu.SendTokenRes, io.ReadCloser, error) {
 	res, err := c.ReplicationServer.GetSendToken(ctx, r)
@@ -504,8 +527,8 @@ func (c *Client) Send(ctx context.Context, r *pdu.SendTokenReq) (*pdu.SendTokenR
 		return res, nil, nil
 	}
 
-	url := fmt.Sprintf("%s%s", c.baseURL, DoSendPathPrefix)
-	sendRes, err := c.client.Get(url)
+	url := fmt.Sprintf("http://daemon/%s/%s", DoSendPathPrefix, res.GetSendToken())
+	sendRes, err := c.bulkTransferClient.Get(url)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -525,8 +548,8 @@ func (c *Client) Receive(ctx context.Context, r *pdu.ReceiveTokenReq, sendStream
 		return err
 	}
 
-	url := fmt.Sprintf("%s%s/%s", c.baseURL, DoReceivePathPrefix, res.GetReceiveToken())
-	receiveRes, err := c.client.Post(url, "application/octet-stream", sendStream)
+	url := fmt.Sprintf("http://daemon/%s/%s", DoReceivePathPrefix, res.GetReceiveToken())
+	receiveRes, err := c.bulkTransferClient.Post(url, "application/octet-stream", sendStream)
 	if err != nil {
 		return err
 	}
