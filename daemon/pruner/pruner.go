@@ -24,9 +24,12 @@ type History interface {
 	ReplicationCursor(ctx context.Context, req *pdu.ReplicationCursorReq) (*pdu.ReplicationCursorRes, error)
 }
 
+// Try to keep it compatible with gitub.com/zrepl/zrepl/replication.Endpoint
 type Target interface {
-	ListFilesystems(ctx context.Context) ([]*pdu.Filesystem, error)
-	ListFilesystemVersions(ctx context.Context, fs string) ([]*pdu.FilesystemVersion, error) // fix depS
+	// Does not include placeholder filesystems
+	ListFilesystems(ctx context.Context, req *pdu.ListFilesystemReq) (*pdu.ListFilesystemRes, error)
+	// FIXME document FilteredError handling
+	ListFilesystemVersions(ctx context.Context, req *pdu.ListFilesystemVersionsReq) (*pdu.ListFilesystemVersionsRes, error) // fix depS
 	DestroySnapshots(ctx context.Context, req *pdu.DestroySnapshotsReq) (*pdu.DestroySnapshotsRes, error)
 }
 
@@ -381,10 +384,11 @@ func statePlan(a *args, u updater) state {
 		ka = &pruner.Progress
 	})
 
-	tfss, err := target.ListFilesystems(ctx)
+	tfssres, err := target.ListFilesystems(ctx, &pdu.ListFilesystemReq{})
 	if err != nil {
 		return onErr(u, err)
 	}
+	tfss := tfssres.GetFilesystems()
 
 	pfss := make([]*fs, len(tfss))
 	for i, tfs := range tfss {
@@ -398,11 +402,12 @@ func statePlan(a *args, u updater) state {
 		}
 		pfss[i] = pfs
 
-		tfsvs, err := target.ListFilesystemVersions(ctx, tfs.Path)
+		tfsvsres, err := target.ListFilesystemVersions(ctx, &pdu.ListFilesystemVersionsReq{Filesystem: tfs.Path})
 		if err != nil {
 			l.WithError(err).Error("cannot list filesystem versions")
 			return onErr(u, err)
 		}
+		tfsvs := tfsvsres.GetVersions()
 		// no progress here since we could run in a live-lock (must have used target AND receiver before progress)
 
 		pfs.snaps = make([]pruning.Snapshot, 0, len(tfsvs))

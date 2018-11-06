@@ -43,7 +43,7 @@ type Sender interface {
 	// If a non-nil io.ReadCloser is returned, it is guaranteed to be closed before
 	// any next call to the parent github.com/zrepl/zrepl/replication.Endpoint.
 	// If the send request is for dry run the io.ReadCloser will be nil
-	Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, io.ReadCloser, error)
+	Send(ctx context.Context, r *pdu.SendTokenReq) (*pdu.SendTokenRes, io.ReadCloser, error)
 	ReplicationCursor(ctx context.Context, req *pdu.ReplicationCursorReq) (*pdu.ReplicationCursorRes, error)
 }
 
@@ -53,7 +53,7 @@ type Receiver interface {
 	// to the parent github.com/zrepl/zrepl/replication.Endpoint.
 	// Implementors must guarantee that Close was called on sendStream before
 	// the call to Receive returns.
-	Receive(ctx context.Context, r *pdu.ReceiveReq, sendStream io.ReadCloser) error
+	Receive(ctx context.Context, r *pdu.ReceiveTokenReq, sendStream io.ReadCloser) error
 }
 
 type StepReport struct {
@@ -420,7 +420,7 @@ func (s *ReplicationStep) doReplication(ctx context.Context, ka *watchdog.KeepAl
 	}()
 	sstream = s.byteCounter
 
-	rr := &pdu.ReceiveReq{
+	rr := &pdu.ReceiveTokenReq{
 		Filesystem:       fs,
 		ClearResumeToken: !sres.UsedResumeToken,
 	}
@@ -490,16 +490,16 @@ func (s *ReplicationStep) updateSizeEstimate(ctx context.Context, sender Sender)
 	return nil
 }
 
-func (s *ReplicationStep) buildSendRequest(dryRun bool) (sr *pdu.SendReq) {
+func (s *ReplicationStep) buildSendRequest(dryRun bool) (sr *pdu.SendTokenReq) {
 	fs := s.parent.fs
 	if s.from == nil {
-		sr = &pdu.SendReq{
+		sr = &pdu.SendTokenReq{
 			Filesystem: fs,
 			To:         s.to.RelName(),
 			DryRun:     dryRun,
 		}
 	} else {
-		sr = &pdu.SendReq{
+		sr = &pdu.SendTokenReq{
 			Filesystem: fs,
 			From:       s.from.RelName(),
 			To:         s.to.RelName(),

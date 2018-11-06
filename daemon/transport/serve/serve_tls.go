@@ -20,45 +20,44 @@ type TLSListenerFactory struct {
 	clientCNs map[string]struct{}
 }
 
-func TLSListenerFactoryFromConfig(c *config.Global, in *config.TLSServe) (lf *TLSListenerFactory, err error) {
-	lf = &TLSListenerFactory{
-		address: in.Listen,
-		handshakeTimeout: in.HandshakeTimeout,
-	}
+func TLSListenerFactoryFromConfig(c *config.Global, in *config.TLSServe) (AuthenticatedListenerFactory,error) {
+
+	address := in.Listen
+	handshakeTimeout := in.HandshakeTimeout
 
 	if in.Ca == "" || in.Cert == "" || in.Key == "" {
 		return nil, errors.New("fields 'ca', 'cert' and 'key'must be specified")
 	}
 
-	lf.clientCA, err = tlsconf.ParseCAFile(in.Ca)
+	clientCA, err := tlsconf.ParseCAFile(in.Ca)
 	if err != nil {
 		return nil, errors.Wrap(err, "cannot parse ca file")
 	}
 
-	lf.serverCert, err = tls.LoadX509KeyPair(in.Cert, in.Key)
+	serverCert, err := tls.LoadX509KeyPair(in.Cert, in.Key)
 	if err != nil {
 		return nil, errors.Wrap(err, "cannot parse cer/key pair")
 	}
 
-	lf.clientCNs = make(map[string]struct{}, len(in.ClientCNs))
+	clientCNs := make(map[string]struct{}, len(in.ClientCNs))
 	for i, cn := range in.ClientCNs {
 		if err := ValidateClientIdentity(cn); err != nil {
 			return nil, errors.Wrapf(err, "unsuitable client_cn #%d %q", i, cn)
 		}
 		// dupes are ok fr now
-		lf.clientCNs[cn] = struct{}{}
+		clientCNs[cn] = struct{}{}
+	}
+
+	lf := func() (AuthenticatedListener, error) {
+		l, err := net.Listen("tcp", address)
+		if err != nil {
+			return nil, err
+		}
+		tl := tlsconf.NewClientAuthListener(l, clientCA, serverCert, handshakeTimeout)
+		return &tlsAuthListener{tl, clientCNs}, nil
 	}
 
 	return lf, nil
-}
-
-func (f *TLSListenerFactory) Listen() (AuthenticatedListener, error) {
-	l, err := net.Listen("tcp", f.address)
-	if err != nil {
-		return nil, err
-	}
-	tl := tlsconf.NewClientAuthListener(l, f.clientCA, f.serverCert, f.handshakeTimeout)
-	return tlsAuthListener{tl, f.clientCNs}, nil
 }
 
 type tlsAuthListener struct {
@@ -66,7 +65,7 @@ type tlsAuthListener struct {
 	clientCNs map[string]struct{}
 }
 
-func (l tlsAuthListener) Accept(ctx context.Context) (AuthenticatedConn, error) {
+func (l tlsAuthListener) Accept(ctx context.Context) (*AuthConn, error) {
 	c, cn, err := l.ClientAuthListener.Accept()
 	if err != nil {
 		return nil, err
@@ -77,7 +76,7 @@ func (l tlsAuthListener) Accept(ctx context.Context) (AuthenticatedConn, error) 
 		}
 		return nil, fmt.Errorf("unauthorized client common name %q from %s", cn, c.RemoteAddr())
 	}
-	return authConn{c, cn}, nil
+	return &AuthConn{c, cn}, nil
 }
 
 

@@ -2,6 +2,7 @@ package job
 
 import (
 	"context"
+	"fmt"
 	"github.com/pkg/errors"
 	"github.com/problame/go-streamrpc"
 	"github.com/prometheus/client_golang/prometheus"
@@ -10,50 +11,41 @@ import (
 	"github.com/zrepl/zrepl/daemon/logging"
 	"github.com/zrepl/zrepl/daemon/transport/serve"
 	"github.com/zrepl/zrepl/daemon/snapper"
+	"github.com/zrepl/zrepl/daemon/transport/transporthttpinjector"
 	"github.com/zrepl/zrepl/endpoint"
+	"github.com/zrepl/zrepl/endpoint/tokenstore"
 	"github.com/zrepl/zrepl/zfs"
-	"path"
+	"net/http"
+	"sync/atomic"
 )
 
 type PassiveSide struct {
 	mode passiveMode
 	name     string
-	l        serve.ListenerFactory
+	listen   serve.AuthenticatedListenerFactory
+
+	tokenStore *tokenstore.Store
+	tokenStoreStop tokenstore.StopExpirationFunc
+
 	rpcConf  *streamrpc.ConnConfig
 }
 
 type passiveMode interface {
-	ConnHandleFunc(ctx context.Context, conn serve.AuthenticatedConn) streamrpc.HandlerFunc
+	Handler(tokenStore endpoint.TokenStore) http.Handler
 	RunPeriodic(ctx context.Context)
 	Type() Type
 }
 
 type modeSink struct {
+	tokenStore endpoint.TokenStore
 	rootDataset *zfs.DatasetPath
 }
 
 func (m *modeSink) Type() Type { return TypeSink }
 
-func (m *modeSink) ConnHandleFunc(ctx context.Context, conn serve.AuthenticatedConn) streamrpc.HandlerFunc {
-	log := GetLogger(ctx)
-
-	clientRootStr := path.Join(m.rootDataset.ToString(), conn.ClientIdentity())
-	clientRoot, err := zfs.NewDatasetPath(clientRootStr)
-	if err != nil {
-		log.WithError(err).
-			WithField("client_identity", conn.ClientIdentity()).
-			Error("cannot build client filesystem map (client identity must be a valid ZFS FS name")
-	}
-	log.WithField("client_root", clientRoot).Debug("client root")
-
-	local, err := endpoint.NewReceiver(clientRoot)
-	if err != nil {
-		log.WithError(err).Error("unexpected error: cannot convert mapping to filter")
-		return nil
-	}
-
-	h := endpoint.NewHandler(local)
-	return h.Handle
+func (m *modeSink) Handler(tokenStore endpoint.TokenStore) http.Handler {
+	local :=  endpoint.NewReceiver(m.rootDataset, tokenStore)
+	return endpoint.ToHandler(local)
 }
 
 func (m *modeSink) RunPeriodic(_ context.Context) {}
@@ -93,10 +85,9 @@ func modeSourceFromConfig(g *config.Global, in *config.SourceJob) (m *modeSource
 
 func (m *modeSource) Type() Type { return TypeSource }
 
-func (m *modeSource) ConnHandleFunc(ctx context.Context, conn serve.AuthenticatedConn) streamrpc.HandlerFunc {
-	sender := endpoint.NewSender(m.fsfilter)
-	h := endpoint.NewHandler(sender)
-	return h.Handle
+func (m *modeSource) Handler(tokenStore endpoint.TokenStore) http.Handler {
+	sender := endpoint.NewSender(m.fsfilter, tokenStore)
+	return endpoint.ToHandler(sender)
 }
 
 func (m *modeSource) RunPeriodic(ctx context.Context) {
@@ -106,8 +97,13 @@ func (m *modeSource) RunPeriodic(ctx context.Context) {
 func passiveSideFromConfig(g *config.Global, in *config.PassiveJob, mode passiveMode) (s *PassiveSide, err error) {
 
 	s = &PassiveSide{mode: mode, name: in.Name}
-	if s.l, s.rpcConf, err = serve.FromConfig(g, in.Serve); err != nil {
-		return nil, errors.Wrap(err, "cannot build server")
+	if s.listen, err = serve.FromConfig(g, in.Serve); err != nil {
+		return nil, errors.Wrap(err, "cannot build listener factory")
+	}
+
+	s.tokenStore, s.tokenStoreStop, err = tokenstore.NewWithRandomKey()
+	if err != nil {
+		return nil, errors.Wrap(err, "cannot build token store")
 	}
 
 	return s, nil
@@ -128,69 +124,43 @@ func (j *PassiveSide) Run(ctx context.Context) {
 	log := GetLogger(ctx)
 	defer log.Info("job exiting")
 
-	l, err := j.l.Listen()
-	if err != nil {
-		log.WithError(err).Error("cannot listen")
-		return
-	}
-	defer l.Close()
+	defer j.tokenStoreStop()
 
 	{
-		ctx, cancel := context.WithCancel(logging.WithSubsystemLoggers(ctx, log)) // shadowing
+		ctx := logging.WithSubsystemLoggers(ctx, log) // shadowing
+		ctx, cancel := context.WithCancel(ctx) // shadowing
 		defer cancel()
 		go j.mode.RunPeriodic(ctx)
 	}
 
-	log.WithField("addr", l.Addr()).Debug("accepting connections")
-	var connId int
-outer:
-	for {
-
-		select {
-		case res := <-accept(ctx, l):
-			if res.err != nil {
-				log.WithError(res.err).Info("accept error")
-				continue
-			}
-			conn := res.conn
-			connId++
-			connLog := log.
-				WithField("connID", connId)
-			connLog.
-				WithField("addr", conn.RemoteAddr()).
-				WithField("client_identity", conn.ClientIdentity()).
-				Info("handling connection")
-			go func() {
-				defer connLog.Info("finished handling connection")
-				defer conn.Close()
-				ctx := logging.WithSubsystemLoggers(ctx, connLog)
-				handleFunc := j.mode.ConnHandleFunc(ctx, conn)
-				if handleFunc == nil {
-					return
-				}
-				if err := streamrpc.ServeConn(ctx, conn, j.rpcConf, handleFunc); err != nil {
-					log.WithError(err).Error("error serving client")
-				}
-			}()
-
-		case <-ctx.Done():
-			break outer
-		}
-
+	handler := j.mode.Handler(j.tokenStore)
+	if handler == nil {
+		panic(fmt.Sprintf("implementation error: j.mode.Handler() returned nil: %#v", j))
 	}
 
-}
+	listener, err := j.listen()
+	if err != nil {
+		log.WithError(err).Error("cannot listen")
+		return
+	}
+	defer listener.Close()
 
-type acceptResult struct {
-	conn serve.AuthenticatedConn
-	err  error
-}
+	// FIXME hacky
+	var connId uint64
+	requestLogger := http.NewServeMux()
+	requestLogger.HandleFunc("/", func(writer http.ResponseWriter, request *http.Request) {
+		connId := atomic.AddUint64(&connId, 1)
+		log := log.WithField("connID", connId) // shadow
+		log.WithField("uri", request.RequestURI).Debug("handling request")
+		request = request.WithContext(logging.WithSubsystemLoggers(request.Context(), log))
+		handler.ServeHTTP(writer, request)
+		log.WithField("uri", request.RequestURI).Debug("finished request")
+	})
 
-func accept(ctx context.Context, listener serve.AuthenticatedListener) <-chan acceptResult {
-	c := make(chan acceptResult, 1)
-	go func() {
-		conn, err := listener.Accept(ctx)
-		c <- acceptResult{conn, err}
-	}()
-	return c
+	server := transporthttpinjector.NewServer(listener, requestLogger)
+	if err := server.Serve(ctx); err != nil {
+		if err != context.Canceled {
+			log.WithError(err).Error("error serving")
+		}
+	}
 }

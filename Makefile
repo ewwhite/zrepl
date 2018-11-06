@@ -59,7 +59,7 @@ vendordeps:
 	dep ensure -v -vendor-only
 
 generate: #not part of the build, must do that manually
-	protoc -I=replication/pdu --go_out=replication/pdu replication/pdu/pdu.proto
+	protoc --twirp_out=. --go_out=. ./replication/pdu/pdu.proto
 	@for pkg in $(_TESTPKGS); do\
 		go generate "$$pkg" || exit 1; \
 	done;
