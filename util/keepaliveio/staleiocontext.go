@@ -39,7 +39,6 @@ type ReadCloserConstructor func(ctx context.Context) (io.ReadCloser, error)
 
 // the returned error can only be from constructor
 func NewKeepaliveReadCloser(ctx context.Context, timeout time.Duration, constructor ReadCloserConstructor) (context.Context, *KeepaliveReadCloser, error) {
-	keepalive := make(chan struct{})
 	ctx, cancel := context.WithCancel(ctx)
 	rc, err := constructor(ctx)
 	if err != nil {
@@ -53,30 +52,36 @@ func NewKeepaliveReadCloser(ctx context.Context, timeout time.Duration, construc
 	}
 	go karc.readWorker()
 	go func() {
-		t := time.NewTimer(timeout)
-		defer func() {
-			if !t.Stop() {
-				<-t.C
-			}
-		}()
+		t := time.NewTicker(timeout)
+		defer t.Stop()
 
 		for {
 			select {
 				case <-ctx.Done():
 					return
 				case <-t.C:
+					lastReadComplete, ok := karc.lastReadComplete.Load().(time.Time)
+					if ok && time.Now().Add(-timeout).Before(lastReadComplete) {
+						continue
+					}
 					karc.timedOutMutex.Lock()
 					karc.timedOut = true
 					close(karc.timeoutSig)
 					cancel()
 					karc.timedOutMutex.Unlock()
 					return
-				case <-keepalive:
-					t.Reset(timeout)
 			}
 		}
 	}()
 	return ctx, karc, nil
+}
+
+func DidTimeOut(r io.ReadCloser) (didTimeOut bool, ok bool) {
+	karc, ok := r.(*KeepaliveReadCloser)
+	if !ok {
+		return false, false
+	}
+	return karc.TimedOut(), true
 }
 
 func (r *KeepaliveReadCloser) TimedOut() bool {
@@ -129,51 +134,4 @@ func (r *KeepaliveReadCloser) Close() error {
 		return KeepaliveReadTimeout
 	}
 	return r.rc.Close()
-}
-
-type keepaliveWriter struct {
-	writer io.Writer
-	keepalive chan struct{}
-}
-
-type WriterConstructor func(ctx context.Context) (io.Writer, error)
-
-// the returned error can only be from constructor
-func KeepaliveWriter(ctx context.Context, timeout time.Duration, constructor WriterConstructor) (context.Context, io.Writer, error) {
-	keepalive := make(chan struct{})
-	ctx, cancel := context.WithCancel(ctx)
-	writer, err := constructor(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
-	go func() {
-		t := time.NewTimer(timeout)
-		defer func() {
-			if !t.Stop() {
-				<-t.C
-			}
-		}()
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				cancel()
-				return
-			case <-keepalive:
-				t.Reset(timeout)
-			}
-		}
-	}()
-	return ctx, keepaliveWriter{writer, keepalive}, nil
-}
-
-func (w keepaliveWriter) Write(p []byte) (n int, err error) {
-	n, err = w.writer.Write(p)
-	select {
-	case w.keepalive <- struct{}{}:
-	default:
-	}
-	return n, err
 }
