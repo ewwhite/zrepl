@@ -147,12 +147,6 @@ func Default(i interface{}) {
 
 type RPCConfig struct {
 	Timeout             time.Duration `yaml:"timeout,optional,positive,default=10s"`
-	TxChunkSize         uint32        `yaml:"tx_chunk_size,optional,default=32768"`
-	RxStructuredMaxLen  uint32        `yaml:"rx_structured_max,optional,default=16777216"`
-	RxStreamChunkMaxLen uint32        `yaml:"rx_stream_chunk_max,optional,default=16777216"`
-	RxHeaderMaxLen      uint32        `yaml:"rx_header_max,optional,default=40960"`
-	SendHeartbeatInterval             time.Duration `yaml:"send_heartbeat_interval,optional,positive,default=5s"`
-
 }
 
 type ConnectEnum struct {

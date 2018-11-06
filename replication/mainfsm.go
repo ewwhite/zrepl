@@ -10,7 +10,6 @@ import (
 	"github.com/zrepl/zrepl/daemon/job/wakeup"
 	"github.com/zrepl/zrepl/util/envconst"
 	"github.com/zrepl/zrepl/util/watchdog"
-	"github.com/problame/go-streamrpc"
 	"math/bits"
 	"net"
 	"sort"
@@ -203,7 +202,6 @@ type Error interface {
 
 var _ Error = fsrep.Error(nil)
 var _ Error = net.Error(nil)
-var _ Error = streamrpc.Error(nil)
 
 func isPermanent(err error) bool {
 	if e, ok := err.(Error); ok {

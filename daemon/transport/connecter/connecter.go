@@ -3,7 +3,6 @@ package connecter
 import (
 	"context"
 	"fmt"
-	"github.com/problame/go-streamrpc"
 	"github.com/zrepl/zrepl/config"
 	"github.com/zrepl/zrepl/daemon/transport"
 	"net"
@@ -12,7 +11,7 @@ import (
 
 
 type HandshakeConnecter struct {
-	connecter streamrpc.Connecter
+	connecter Connecter
 }
 
 func (c HandshakeConnecter) Connect(ctx context.Context) (net.Conn, error) {

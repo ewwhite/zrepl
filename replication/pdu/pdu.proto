@@ -83,7 +83,6 @@ message SendTokenRes {
 }
 
 message ReceiveTokenReq {
-    // The stream part of the streamrpc request contains the zfs send stream
     string Filesystem = 1; // FIXME should be snapshot name, we can enforce that on recv
 
     // If true, the receiver should clear the resume token before perfoming the zfs recv of the stream in the request
