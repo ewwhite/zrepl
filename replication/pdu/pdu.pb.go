@@ -522,7 +522,6 @@ func (m *SendTokenRes) GetProperties() []*Property {
 }
 
 type ReceiveTokenReq struct {
-	// The stream part of the streamrpc request contains the zfs send stream
 	Filesystem string `protobuf:"bytes,1,opt,name=Filesystem,proto3" json:"Filesystem,omitempty"`
 	// If true, the receiver should clear the resume token before perfoming the zfs recv of the stream in the request
 	ClearResumeToken     bool     `protobuf:"varint,2,opt,name=ClearResumeToken,proto3" json:"ClearResumeToken,omitempty"`
