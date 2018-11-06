@@ -18,6 +18,14 @@
   version = "v1.1.0"
 
 [[projects]]
+  digest = "1:6098222470fe0172157ce9bbef5d2200df4edde17ee649c5d6e48330e4afa4c6"
+  name = "github.com/dgrijalva/jwt-go"
+  packages = ["."]
+  pruneopts = ""
+  revision = "06ea1031745cb8b3dab3f6a236daf2b0aa468b7e"
+  version = "v3.2.0"
+
+[[projects]]
   digest = "1:e988ed0ca0d81f4d28772760c02ee95084961311291bdfefc1b04617c178b722"
   name = "github.com/fatih/color"
   packages = ["."]
@@ -64,7 +72,11 @@
 [[projects]]
   digest = "1:3dd078fda7500c341bc26cfbc6c6a34614f295a2457149fc1045cab767cbcf18"
   name = "github.com/golang/protobuf"
-  packages = ["proto"]
+  packages = [
+    "jsonpb",
+    "proto",
+    "ptypes/struct",
+  ]
   pruneopts = ""
   revision = "aa810b61a9c79d51363740d207bb46cf8e620ed5"
   version = "v1.2.0"
@@ -159,7 +171,7 @@
 
 [[projects]]
   branch = "master"
-  digest = "1:1392748e290ca66ac8447ef24961f8ae9e1d846a53af0f58a5a0256982ce0577"
+  digest = "1:25559b520313b941b1395cd5d5ee66086b27dc15a1391c0f2aad29d5c2321f4b"
   name = "github.com/problame/go-netssh"
   packages = ["."]
   pruneopts = ""
@@ -172,17 +184,6 @@
   packages = ["."]
   pruneopts = ""
   revision = "391d2c78c8404a9683d79f75dd24ab53040f89f7"
-
-[[projects]]
-  digest = "1:1bcbb0a7ad8d3392d446eb583ae5415ff987838a8f7331a36877789be20667e6"
-  name = "github.com/problame/go-streamrpc"
-  packages = [
-    ".",
-    "internal/pdu",
-  ]
-  pruneopts = ""
-  revision = "d5d111e014342fe1c37f0b71cc37ec5f2afdfd13"
-  version = "v0.5"
 
 [[projects]]
   branch = "master"
@@ -256,6 +257,18 @@
   version = "v1.1.4"
 
 [[projects]]
+  digest = "1:a898310493725a9788c7ef850030f437bf13f951821ad948f55eec91b58322b5"
+  name = "github.com/twitchtv/twirp"
+  packages = [
+    ".",
+    "ctxsetters",
+    "internal/contextkeys",
+  ]
+  pruneopts = ""
+  revision = "d08b9415baf292b016ed9c55c37e66154c46c221"
+  version = "v5.5.0"
+
+[[projects]]
   branch = "v2"
   digest = "1:9d92186f609a73744232323416ddafd56fae67cb552162cc190ab903e36900dd"
   name = "github.com/zrepl/yaml-config"
@@ -289,9 +302,11 @@
   analyzer-name = "dep"
   analyzer-version = 1
   input-imports = [
+    "github.com/dgrijalva/jwt-go",
     "github.com/fatih/color",
     "github.com/gdamore/tcell/termbox",
     "github.com/go-logfmt/logfmt",
+    "github.com/golang/protobuf/jsonpb",
     "github.com/golang/protobuf/proto",
     "github.com/jinzhu/copier",
     "github.com/kr/pretty",
@@ -299,13 +314,14 @@
     "github.com/pkg/errors",
     "github.com/problame/go-netssh",
     "github.com/problame/go-rwccmd",
-    "github.com/problame/go-streamrpc",
     "github.com/prometheus/client_golang/prometheus",
     "github.com/prometheus/client_golang/prometheus/promhttp",
     "github.com/spf13/cobra",
     "github.com/spf13/pflag",
     "github.com/stretchr/testify/assert",
     "github.com/stretchr/testify/require",
+    "github.com/twitchtv/twirp",
+    "github.com/twitchtv/twirp/ctxsetters",
     "github.com/zrepl/yaml-config",
     "golang.org/x/sys/unix",
   ]
