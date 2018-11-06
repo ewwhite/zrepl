@@ -17,6 +17,7 @@ type readWork struct {
 
 type KeepaliveReadCloser struct {
 	rc        io.ReadCloser
+	onClose    context.CancelFunc
 
 	timedOutMutex sync.Mutex
 	timedOut bool
@@ -42,9 +43,11 @@ func NewKeepaliveReadCloser(ctx context.Context, timeout time.Duration, construc
 	ctx, cancel := context.WithCancel(ctx)
 	rc, err := constructor(ctx)
 	if err != nil {
+		cancel()
 		return nil, nil, err
 	}
 	karc := &KeepaliveReadCloser{
+		onClose: cancel,
 		rc: rc,
 		currentReadComplete: make(chan struct{}, 1),
 		timeoutSig: make(chan struct{}, 1),
@@ -131,7 +134,9 @@ func (r *KeepaliveReadCloser) Read(p []byte) (n int, err error) {
 
 func (r *KeepaliveReadCloser) Close() error {
 	if r.TimedOut() {
+		r.onClose()
 		return KeepaliveReadTimeout
 	}
+	r.onClose()
 	return r.rc.Close()
 }
