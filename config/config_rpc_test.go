@@ -32,7 +32,7 @@ jobs:
     type: tcp
     address: "server1.foo.bar:8888"
   rpc:
-    timeout: 20s # different form default, should merge
+    send_call_idle_timeout: 20s # different form default, should merge
   root_fs: "pool2/backup_servers"
   interval: 10m
   pruning:
@@ -79,10 +79,18 @@ jobs:
   #  zfs_recv_idle_timeout: 42s
 
 `)
-	assert.Equal(t, 10*time.Second, conf.Jobs[0].Ret.(*PullJob).RPC.Timeout)
-	assert.Equal(t, 20*time.Second, conf.Jobs[1].Ret.(*PullJob).RPC.Timeout)
+	// default client
+	assert.Equal(t, 60*time.Second, conf.Jobs[0].Ret.(*PullJob).RPC.RPCCallTimeout)
+	assert.Equal(t, 10*time.Second, conf.Jobs[0].Ret.(*PullJob).RPC.SendCallIdleTimeout)
+	assert.Equal(t, 10*time.Second, conf.Jobs[0].Ret.(*PullJob).RPC.RecvCallIdleTimeout)
+
+	// individual overrides work
+	assert.Equal(t, 20*time.Second, conf.Jobs[1].Ret.(*PullJob).RPC.SendCallIdleTimeout)
+
 	assert.Equal(t, 23*time.Second, conf.Jobs[2].Ret.(*SinkJob).RPC.ZFSSendIdleTimeout)
 	assert.Equal(t, 42*time.Second, conf.Jobs[3].Ret.(*SinkJob).RPC.ZFSReceiveIdleTimeout)
+
+	// default server
 	assert.Equal(t, 10*time.Second, conf.Jobs[4].Ret.(*SinkJob).RPC.ZFSSendIdleTimeout)
 	assert.Equal(t, 10*time.Second, conf.Jobs[4].Ret.(*SinkJob).RPC.ZFSReceiveIdleTimeout)
 }
