@@ -87,14 +87,7 @@ func NewServer(listener serve.AuthenticatedListener, handler http.Handler) Serve
 		l: authListenerNetListenerAdaptor{listener},
 		s: http.Server{
 			Handler:           authconnIdentityInjector{handler},
-			ReadTimeout:       0,
-			ReadHeaderTimeout: 0,
-			WriteTimeout:      0,
-			IdleTimeout:       0,
-			MaxHeaderBytes:    0,
-			TLSNextProto:      nil,
-			ConnState:         nil,
-			ErrorLog:          nil,
+			// TODO FIXME ErrorLog
 		},
 	}
 }

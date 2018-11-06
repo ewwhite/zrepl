@@ -46,7 +46,8 @@ func (j JobEnum) Name() string {
 type ActiveJob struct {
 	Type         string                `yaml:"type"`
 	Name         string                `yaml:"name"`
-	Connect     ConnectEnum     `yaml:"connect"`
+	Connect     ConnectEnum            `yaml:"connect"`
+	RPC 		*RPCClientConfig        `yaml:"rpc,optional,fromdefaults"`
 	Pruning      PruningSenderReceiver `yaml:"pruning"`
 	Debug        JobDebugSettings      `yaml:"debug,optional"`
 }
@@ -55,6 +56,7 @@ type PassiveJob struct {
 	Type        string           `yaml:"type"`
 	Name        string           `yaml:"name"`
 	Serve       ServeEnum `yaml:"serve"`
+	RPC 		*RPCServerConfig `yaml:"rpc,optional,fromdefaults"`
 	Debug       JobDebugSettings `yaml:"debug,optional"`
 }
 
@@ -130,7 +132,6 @@ type Global struct {
 	Monitoring []MonitoringEnum       `yaml:"monitoring,optional"`
 	Control    *GlobalControl         `yaml:"control,optional,fromdefaults"`
 	Serve      *GlobalServe           `yaml:"serve,optional,fromdefaults"`
-	RPC        *RPCConnectConfig      `yaml:"rpc,optional,fromdefaults"`
 }
 
 func Default(i interface{}) {
@@ -145,8 +146,10 @@ func Default(i interface{}) {
 	}
 }
 
-type RPCConnectConfig struct {
-	Timeout             time.Duration `yaml:"timeout,optional,positive,default=10s"`
+type RPCClientConfig struct {
+	RPCCallTimeout      time.Duration `yaml:"rpc_call_timeout,optional,positive,default=1m"`
+	SendCallIdleTimeout time.Duration `yaml:"send_call_idle_timeout,optional,positive,default=10s"`
+	RecvCallIdleTimeout time.Duration `yaml:"recv_call_idle_timeout,optional,positive,default=10s"`
 }
 
 type ConnectEnum struct {
@@ -155,7 +158,6 @@ type ConnectEnum struct {
 
 type ConnectCommon struct {
 	Type string            `yaml:"type"`
-	RPC  *RPCConnectConfig `yaml:"rpc,optional"`
 }
 
 type TCPConnect struct {
@@ -197,12 +199,12 @@ type ServeEnum struct {
 }
 
 type RPCServerConfig struct {
-	Timeout             time.Duration `yaml:"timeout,optional,positive,default=10s"`
+	ZFSSendIdleTimeout             time.Duration `yaml:"zfs_send_idle_timeout,optional,positive,default=10s"`
+	ZFSReceiveIdleTimeout          time.Duration `yaml:"zfs_recv_idle_timeout,optional,positive,default=10s"`
 }
 
 type ServeCommon struct {
 	Type string            `yaml:"type"`
-	RPC  *RPCServerConfig  `yaml:"rpc,optional"`
 }
 
 type TCPServe struct {
