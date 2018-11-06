@@ -31,6 +31,8 @@ type ActiveSide struct {
 	tokenStore 	*tokenstore.Store
 	tokenStoreStop tokenstore.StopExpirationFunc
 
+	validatedClientConfig endpoint.HttpClientConfig
+
 	prunerFactory *pruner.PrunerFactory
 
 
@@ -82,7 +84,7 @@ func (a *ActiveSide) updateTasks(u func(*activeSideTasks)) activeSideTasks {
 }
 
 type activeMode interface {
-	SenderReceiver(tokenStore endpoint.TokenStore, transport *http.Transport) (replication.Sender, replication.Receiver)
+	SenderReceiver(tokenStore endpoint.TokenStore, transport *http.Transport, clientConfig endpoint.HttpClientConfig) (replication.Sender, replication.Receiver)
 	Type() Type
 	RunPeriodic(ctx context.Context, wakeUpCommon chan<- struct{})
 }
@@ -92,9 +94,9 @@ type modePush struct {
 	snapper *snapper.PeriodicOrManual
 }
 
-func (m *modePush) SenderReceiver(tokenStore endpoint.TokenStore, transport *http.Transport) (replication.Sender, replication.Receiver) {
+func (m *modePush) SenderReceiver(tokenStore endpoint.TokenStore, transport *http.Transport, clientConfig endpoint.HttpClientConfig) (replication.Sender, replication.Receiver) {
 	sender := endpoint.NewSender(m.fsfilter, tokenStore)
-	receiver := endpoint.NewClient(transport)
+	receiver := endpoint.NewClient(transport, clientConfig)
 	return endpoint.NewLocal(sender), receiver
 }
 
@@ -125,8 +127,8 @@ type modePull struct {
 	interval time.Duration
 }
 
-func (m *modePull) SenderReceiver(tokenStore endpoint.TokenStore, transport *http.Transport) (replication.Sender, replication.Receiver) {
-	sender := endpoint.NewClient(transport)
+func (m *modePull) SenderReceiver(tokenStore endpoint.TokenStore, transport *http.Transport, clientConfig endpoint.HttpClientConfig) (replication.Sender, replication.Receiver) {
+	sender := endpoint.NewClient(transport, clientConfig)
 	receiver := endpoint.NewReceiver(m.rootFS, tokenStore)
 	return sender, endpoint.NewLocal(receiver)
 }
@@ -199,7 +201,11 @@ func activeSide(g *config.Global, in *config.ActiveJob, mode activeMode) (j *Act
 		return nil, errors.Wrap(err, "cannot build token store")
 	}
 
-		j.promPruneSecs = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+	if err := j.validatedClientConfig.FromConfig(g, in.RPC); err != nil {
+		return nil, errors.Wrap(err, "invalid rpc client config")
+	}
+
+	j.promPruneSecs = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace:   "zrepl",
 		Subsystem:   "pruning",
 		Name:        "time",
@@ -366,7 +372,7 @@ func (j *ActiveSide) do(ctx context.Context) {
 	}()
 
 	transport := transporthttpinjector.ClientTransport(j.connecter)
-	sender, receiver := j.mode.SenderReceiver(j.tokenStore, transport)
+	sender, receiver := j.mode.SenderReceiver(j.tokenStore, transport, j.validatedClientConfig)
 
 	{
 		select {

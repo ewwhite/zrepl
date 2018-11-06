@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/pkg/errors"
+	"github.com/zrepl/zrepl/config"
 	"github.com/zrepl/zrepl/daemon/transport/transporthttpinjector"
 	"github.com/zrepl/zrepl/replication"
 	"github.com/zrepl/zrepl/replication/pdu"
@@ -451,6 +452,29 @@ type ReplicationServer interface {
 type HttpHandler struct {
 	mux *http.ServeMux
 	srv ReplicationServer
+
+	config *HttpHandlerConfig
+}
+
+type HttpHandlerConfig struct {
+	ZFSReceiveIdleTimeout 	time.Duration
+	ZFSSendIdleTimeout 		time.Duration
+}
+
+func (c HttpHandlerConfig) Validate() error {
+	if c.ZFSReceiveIdleTimeout < 0 {
+		return fmt.Errorf("ZFSReceiveIdleTimeout must be 0 or positive")
+	}
+	if c.ZFSSendIdleTimeout < 0 {
+		return fmt.Errorf("ZFSSendIdleTimeout must be 0 or positive")
+	}
+	return nil
+}
+
+func (c *HttpHandlerConfig) FromConfig(global *config.Global, serverConfig *config.RPCServerConfig) error {
+	c.ZFSSendIdleTimeout = serverConfig.ZFSSendIdleTimeout
+	c.ZFSReceiveIdleTimeout = serverConfig.ZFSReceiveIdleTimeout
+	return c.Validate()
 }
 
 var _ http.Handler
@@ -467,10 +491,15 @@ func init() {
 	}
 }
 
-func ToHandler(srv ReplicationServer) *HttpHandler {
+// config must be valid or ToHandler will panic
+func ToHandler(srv ReplicationServer, config HttpHandlerConfig) *HttpHandler {
+	if err := config.Validate(); err != nil {
+		panic(fmt.Errorf("handler config invalid: %s", err))
+	}
 	h := &HttpHandler{
 		mux: http.NewServeMux(),
 		srv: srv,
+		config: &config,
 	}
 	twirpHandler := pdu.NewReplicationServerServer(h.srv, nil)
 	h.mux.Handle(pdu.ReplicationServerPathPrefix, twirpHandler)
@@ -498,20 +527,30 @@ func (s *HttpHandler) handleSendRecv(mode int, w http.ResponseWriter, r *http.Re
 	switch mode {
 	default:
 		panic(fmt.Sprintf("implementation error: unknown mode %d", mode))
-	case 0: // send
-		ctx, stream, err := keepaliveio.NewKeepaliveReadCloser(r.Context(), 10*time.Second, func(ctx context.Context) (io.ReadCloser, error) {
-			return s.srv.DoSend(ctx, token)
-		})
+	case 0: // send to client
+
+		var (
+			stream io.ReadCloser
+			err error
+		)
+		if s.config.ZFSSendIdleTimeout != 0 {
+			_, stream, err = keepaliveio.NewKeepaliveReadCloser(
+				r.Context(),
+				s.config.ZFSSendIdleTimeout,
+				func(ctx context.Context) (io.ReadCloser, error) {
+					return s.srv.DoSend(r.Context(), token)
+				})
+		} else { // avoid performance hit
+			stream, err = s.srv.DoSend(r.Context(), token)
+		}
+
 		if err != nil {
 			// TODO classify error as server or client side
 			w.WriteHeader(500)
 			fmt.Fprintf(w, "%s", err)
 		} else {
-			w.WriteHeader(200)
-			_, writer, _ := keepaliveio.KeepaliveWriter(ctx, 10*time.Second, func(ctx context.Context) (io.Writer, error) { // FIXME constant
-				return w, nil
-			}) // can ignore err because constructor always returns nil
-			_, err := io.Copy(writer, stream)
+			w.WriteHeader(200) // 200 is checked by HttpClient
+			_, err := io.Copy(w, stream)
 			// this error could be on the receiving side, network related, or our side
 			// thus, we should log it
 			if err != nil {
@@ -519,26 +558,38 @@ func (s *HttpHandler) handleSendRecv(mode int, w http.ResponseWriter, r *http.Re
 			}
 		}
 	case 1:
-		timeout := 10 * time.Second
-		ctx, stream, _ := keepaliveio.NewKeepaliveReadCloser(r.Context(), timeout, func(ctx context.Context) (io.ReadCloser, error) {
-			return r.Body, nil
-		})
-		err := s.srv.DoReceive(ctx, token, stream)
-		if stream.TimedOut() {
-			err = fmt.Errorf("receive aborted after due to client keepalive timeout")
-			getLogger(ctx).WithField("timeout", timeout).
-				Error("receive aborted due to client keepalive timeout")
+
+		var (
+			ctx context.Context
+			stream io.ReadCloser
+		)
+		if s.config.ZFSReceiveIdleTimeout != 0 {
+			ctx, stream, _ = keepaliveio.NewKeepaliveReadCloser(
+				r.Context(),
+				s.config.ZFSReceiveIdleTimeout,
+				func(ctx context.Context) (io.ReadCloser, error) {
+					return r.Body, nil
+			})
+		} else {
+			ctx = r.Context()
+			stream = r.Body
 		}
-		_, writer, _ := keepaliveio.KeepaliveWriter(ctx, timeout, func(ctx context.Context) (io.Writer, error) {
-			return w, nil
-		})
+
+		err := s.srv.DoReceive(ctx, token, stream)
+		if didTO, ok := keepaliveio.DidTimeOut(stream); ok && didTO {
+			err = fmt.Errorf("receive aborted after due to client keepalive timeout")
+			getLogger(ctx).WithField("timeout", s.config.ZFSReceiveIdleTimeout).
+				Error("receive aborted due to client keepalive timeout")
+			getLogger(ctx).Debug("not sending response to client, they timed out")
+			return
+		}
 		if err != nil {
 			// TODO classify error as server or client side
 			w.WriteHeader(500)
-			fmt.Fprintf(writer , "%s", err)
+			fmt.Fprintf(w, "%s", err)
 		} else {
-			w.WriteHeader(200)
-			fmt.Fprintf(writer, "transfer successful")
+			w.WriteHeader(200) // 200 is checked by HttpClient
+			fmt.Fprintf(w, "transfer successful")
 		}
 	}
 }
@@ -555,27 +606,73 @@ func (s *HttpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // HttpClient implements the interfaces required by package replication
 // for a remote instance of ReplicationServer
 type HttpClient struct {
-	transport *http.Transport
-	twirpHttpClient    http.Client
-	bulkTransferClient http.Client
+	config          *HttpClientConfig
+	transport       *http.Transport
+	twirpHttpClient http.Client
+	sendClient      http.Client
+	recvClient 		http.Client
 
 	pdu.ReplicationServer // this the twirp client instance, see constructor
+}
+
+type HttpClientConfig struct {
+	RPCCallTimeout      time.Duration
+	SendCallIdleTimeout time.Duration
+	RecvCallIdleTimeout time.Duration
+}
+
+func (c HttpClientConfig) Validate() error {
+	if c.RPCCallTimeout < 0 {
+		return fmt.Errorf("RPCCallTimeout must be 0 or positive")
+	}
+	if c.SendCallIdleTimeout < 0 {
+		return fmt.Errorf("SendCallIdleTimeout must be 0 or positive")
+	}
+	if c.RecvCallIdleTimeout < 0 {
+		return fmt.Errorf("RecvCallIdleTimeout must be 0 or positive")
+	}
+	return nil
+}
+
+func (c *HttpClientConfig) FromConfig(global *config.Global, serverConfig *config.RPCClientConfig) error {
+	c.RPCCallTimeout = serverConfig.RPCCallTimeout
+	c.SendCallIdleTimeout = serverConfig.SendCallIdleTimeout
+	c.RecvCallIdleTimeout = serverConfig.RecvCallIdleTimeout
+	return c.Validate()
 }
 
 var _ replication.Endpoint = &HttpClient{}
 var _ replication.Sender = &HttpClient{}
 var _ replication.Receiver = &HttpClient{}
 
-func NewClient(transport *http.Transport) *HttpClient {
-	twirpHttpClient := http.Client{Transport: transport}
-	bulkTransferClient := http.Client{
-		Timeout: 0,
+// config must be validated, NewClient will panic if it is not valid
+func NewClient(transport *http.Transport, config HttpClientConfig) *HttpClient {
+	if err := config.Validate(); err != nil {
+		panic(fmt.Errorf("client config invalid: %s", err))
+	}
+	twirpHttpClient := http.Client{
+		Timeout: config.RPCCallTimeout, // full request timeout
 		Transport: transport,
 	}
+	var sendTransport http.Transport = *transport
+	sendTransport.ResponseHeaderTimeout = config.RPCCallTimeout
+	sendClient := http.Client{
+		Timeout: 0, // can't do full request timeouts, we use package keepaliveio
+		Transport: &sendTransport,
+	}
+	var recvTransport http.Transport = *transport
+	// do _not_ use any header timeout here since the Post takes arbitrarily long (rely on keepaliveio on local zfs send instead)
+	recvClient := http.Client{
+		Timeout: 0, // can't do full request timeouts, we use package keepaliveio
+		Transport: &recvTransport,
+	}
+
 	c := &HttpClient{
-		transport: transport,
+		config:          &config,
+		transport:       transport,
 		twirpHttpClient: twirpHttpClient,
-		bulkTransferClient: bulkTransferClient,
+		sendClient:      sendClient,
+		recvClient: 	 recvClient,
 	}
 	c.ReplicationServer = pdu.NewReplicationServerProtobufClient("http://daemon", &c.twirpHttpClient) // '/' could be anything
 	return c
@@ -591,16 +688,27 @@ func (c *HttpClient) Send(ctx context.Context, r *pdu.SendTokenReq) (*pdu.SendTo
 	}
 
 	url := fmt.Sprintf("http://daemon%s%s", DoSendPathPrefix, res.GetSendToken())
-	sendRes, err := c.bulkTransferClient.Get(url)
+	sendRes, err := c.sendClient.Get(url)
 	if err != nil {
 		return nil, nil, err
 	}
+
+	var stream io.ReadCloser
+	if c.config.SendCallIdleTimeout > 0 {
+		_, stream, _ = keepaliveio.NewKeepaliveReadCloser(ctx, c.config.SendCallIdleTimeout, func(ctx context.Context) (io.ReadCloser, error) {
+			return sendRes.Body, nil
+		})
+	} else {
+		stream = sendRes.Body
+	}
+
 	if sendRes.StatusCode != 200 { // TODO 200 too restrictive?
 		var errorMsg strings.Builder
-		io.Copy(&errorMsg, io.LimitReader(sendRes.Body, 1 << 15)) // TODO error handling?
+		io.Copy(&errorMsg, io.LimitReader(stream, 1 << 15)) // TODO error handling?
 		return nil, nil, fmt.Errorf("remote send error: %s", strings.TrimSpace(errorMsg.String()))
 	}
-	return res, sendRes.Body, nil
+
+	return res, stream, nil
 }
 
 func (c *HttpClient) Receive(ctx context.Context, r *pdu.ReceiveTokenReq, sendStream io.ReadCloser) error {
@@ -611,14 +719,46 @@ func (c *HttpClient) Receive(ctx context.Context, r *pdu.ReceiveTokenReq, sendSt
 		return err
 	}
 
+	if c.config.RecvCallIdleTimeout > 0 {
+		originalSendStream := sendStream
+		defer originalSendStream.Close()
+
+		ctx, sendStream, _ = keepaliveio.NewKeepaliveReadCloser( // shadowing!
+			ctx,
+			c.config.RecvCallIdleTimeout,
+			func(ctx context.Context) (io.ReadCloser, error) {
+				return sendStream, nil
+			},
+		)
+		go func() {
+			<-ctx.Done()
+			getLogger(ctx).Debug("keepalive reader context done, assuming connection idle timeout, closing send stream")
+			originalSendStream.Close()
+			getLogger(ctx).Debug("send stream closed")
+		}()
+	}
+
+	getLogger(ctx).WithField("send_stream_type", fmt.Sprintf("%T", sendStream)).Debug("send stream wrapped")
+
 	url := fmt.Sprintf("http://daemon%s%s", DoReceivePathPrefix, res.GetReceiveToken())
-	receiveRes, err := c.bulkTransferClient.Post(url, "application/octet-stream", sendStream)
+	receiveRes, err := c.recvClient.Post(url, "application/octet-stream", sendStream)
+	if didTO, ok := keepaliveio.DidTimeOut(sendStream); ok && didTO {
+		err = fmt.Errorf("recv call idle timeout excceeded")
+	}
 	if err != nil {
 		return err
 	}
+
+	_, body, _  := keepaliveio.NewKeepaliveReadCloser(
+		ctx,
+		c.config.RPCCallTimeout, // yes, this is the right choice, we expect only a few bytes of errors from now on
+		func(ctx context.Context) (io.ReadCloser, error) {
+			return receiveRes.Body, nil
+	})
+
 	if receiveRes.StatusCode != 200 { // TODO 200 too restrictive?
 		var errorMsg strings.Builder
-		io.Copy(&errorMsg, io.LimitReader(receiveRes.Body, 1 << 15)) // TODO error handling?
+		io.Copy(&errorMsg, io.LimitReader(body, 1 << 15)) // TODO error handling?
 		return fmt.Errorf("remote receive error: %s", strings.TrimSpace(errorMsg.String()))
 	}
 	return nil

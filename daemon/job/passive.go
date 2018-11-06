@@ -26,10 +26,11 @@ type PassiveSide struct {
 	tokenStore *tokenstore.Store
 	tokenStoreStop tokenstore.StopExpirationFunc
 
+	validatedHandlerConfig endpoint.HttpHandlerConfig
 }
 
 type passiveMode interface {
-	Handler(tokenStore endpoint.TokenStore) http.Handler
+	Handler(handlerConfig endpoint.HttpHandlerConfig, tokenStore endpoint.TokenStore) http.Handler
 	RunPeriodic(ctx context.Context)
 	Type() Type
 }
@@ -41,9 +42,9 @@ type modeSink struct {
 
 func (m *modeSink) Type() Type { return TypeSink }
 
-func (m *modeSink) Handler(tokenStore endpoint.TokenStore) http.Handler {
+func (m *modeSink) Handler(handlerConfig endpoint.HttpHandlerConfig, tokenStore endpoint.TokenStore) http.Handler {
 	local :=  endpoint.NewReceiver(m.rootDataset, tokenStore)
-	return endpoint.ToHandler(local)
+	return endpoint.ToHandler(local, handlerConfig)
 }
 
 func (m *modeSink) RunPeriodic(_ context.Context) {}
@@ -83,9 +84,9 @@ func modeSourceFromConfig(g *config.Global, in *config.SourceJob) (m *modeSource
 
 func (m *modeSource) Type() Type { return TypeSource }
 
-func (m *modeSource) Handler(tokenStore endpoint.TokenStore) http.Handler {
+func (m *modeSource) Handler(handlerConfig endpoint.HttpHandlerConfig, tokenStore endpoint.TokenStore) http.Handler {
 	sender := endpoint.NewSender(m.fsfilter, tokenStore)
-	return endpoint.ToHandler(sender)
+	return endpoint.ToHandler(sender, handlerConfig)
 }
 
 func (m *modeSource) RunPeriodic(ctx context.Context) {
@@ -97,6 +98,10 @@ func passiveSideFromConfig(g *config.Global, in *config.PassiveJob, mode passive
 	s = &PassiveSide{mode: mode, name: in.Name}
 	if s.listen, err = serve.FromConfig(g, in.Serve); err != nil {
 		return nil, errors.Wrap(err, "cannot build listener factory")
+	}
+
+	if err := s.validatedHandlerConfig.FromConfig(g, in.RPC); err != nil {
+		return nil, errors.Wrap(err, "invalid rpc config")
 	}
 
 	s.tokenStore, s.tokenStoreStop, err = tokenstore.NewWithRandomKey()
@@ -131,7 +136,7 @@ func (j *PassiveSide) Run(ctx context.Context) {
 		go j.mode.RunPeriodic(ctx)
 	}
 
-	handler := j.mode.Handler(j.tokenStore)
+	handler := j.mode.Handler(j.validatedHandlerConfig, j.tokenStore)
 	if handler == nil {
 		panic(fmt.Sprintf("implementation error: j.mode.Handler() returned nil: %#v", j))
 	}
