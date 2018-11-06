@@ -13,20 +13,24 @@ import (
 	"github.com/zrepl/zrepl/daemon/snapper"
 	"github.com/zrepl/zrepl/daemon/transport/transporthttpinjector"
 	"github.com/zrepl/zrepl/endpoint"
+	"github.com/zrepl/zrepl/endpoint/tokenstore"
 	"github.com/zrepl/zrepl/zfs"
 	"net/http"
-	"path"
 )
 
 type PassiveSide struct {
 	mode passiveMode
 	name     string
-	l        serve.AuthenticatedListener
+	listen   serve.AuthenticatedListenerFactory
+
+	tokenStore *tokenstore.Store
+	tokenStoreStop tokenstore.StopExpirationFunc
+
 	rpcConf  *streamrpc.ConnConfig
 }
 
 type passiveMode interface {
-	Handler() http.Handler
+	Handler(tokenStore endpoint.TokenStore) http.Handler
 	RunPeriodic(ctx context.Context)
 	Type() Type
 }
@@ -38,23 +42,9 @@ type modeSink struct {
 
 func (m *modeSink) Type() Type { return TypeSink }
 
-func (m *modeSink) Handler(ctx context.Context) http.Handler {
-
-	log := GetLogger(ctx)
-
-	clientRootStr := path.Join(m.rootDataset.ToString(), conn.ClientIdentity())
-	clientRoot, err := zfs.NewDatasetPath(clientRootStr)
-	if err != nil {
-		log.WithError(err).
-			WithField("client_identity", conn.ClientIdentity()).
-			Error("cannot build client filesystem map (client identity must be a valid ZFS FS name")
-	}
-	log.WithField("client_root", clientRoot).Debug("client root")
-
-	local :=  endpoint.NewReceiver(clientRoot)
-
-	h := endpoint.NewHandler(local)
-	return h.Handle
+func (m *modeSink) Handler(tokenStore endpoint.TokenStore) http.Handler {
+	local :=  endpoint.NewReceiver(m.rootDataset, tokenStore)
+	return endpoint.ToHandler(local)
 }
 
 func (m *modeSink) RunPeriodic(_ context.Context) {}
@@ -94,10 +84,9 @@ func modeSourceFromConfig(g *config.Global, in *config.SourceJob) (m *modeSource
 
 func (m *modeSource) Type() Type { return TypeSource }
 
-func (m *modeSource) ConnHandleFunc(ctx context.Context, conn serve.AuthenticatedConn) streamrpc.HandlerFunc {
-	sender := endpoint.NewSender(m.fsfilter)
-	h := endpoint.NewHandler(sender)
-	return h.Handle
+func (m *modeSource) Handler(tokenStore endpoint.TokenStore) http.Handler {
+	sender := endpoint.NewSender(m.fsfilter, tokenStore)
+	return endpoint.ToHandler(sender)
 }
 
 func (m *modeSource) RunPeriodic(ctx context.Context) {
@@ -107,8 +96,13 @@ func (m *modeSource) RunPeriodic(ctx context.Context) {
 func passiveSideFromConfig(g *config.Global, in *config.PassiveJob, mode passiveMode) (s *PassiveSide, err error) {
 
 	s = &PassiveSide{mode: mode, name: in.Name}
-	if s.l, s.rpcConf, err = serve.FromConfig(g, in.Serve); err != nil {
-		return nil, errors.Wrap(err, "cannot build server")
+	if s.listen, err = serve.FromConfig(g, in.Serve); err != nil {
+		return nil, errors.Wrap(err, "cannot build listener factory")
+	}
+
+	s.tokenStore, s.tokenStoreStop, err = tokenstore.NewWithRandomKey()
+	if err != nil {
+		return nil, errors.Wrap(err, "cannot build token store")
 	}
 
 	return s, nil
@@ -129,18 +123,28 @@ func (j *PassiveSide) Run(ctx context.Context) {
 	log := GetLogger(ctx)
 	defer log.Info("job exiting")
 
+	defer j.tokenStoreStop()
+
+	ctx = logging.WithSubsystemLoggers(ctx, log)
 	{
-		ctx, cancel := context.WithCancel(logging.WithSubsystemLoggers(ctx, log)) // shadowing
+		ctx, cancel := context.WithCancel(ctx) // shadowing
 		defer cancel()
 		go j.mode.RunPeriodic(ctx)
 	}
 
-	handler := j.mode.Handler()
+	handler := j.mode.Handler(j.tokenStore)
 	if handler == nil {
-		panic(fmt.Sprintf("implementation error: j.mode.Handler() returned nil: %#v", l))
+		panic(fmt.Sprintf("implementation error: j.mode.Handler() returned nil: %#v", j))
 	}
 
-	server := transporthttpinjector.NewServer(j.l, handler)
+	listener, err := j.listen()
+	if err != nil {
+		log.WithError(err).Error("cannot listen")
+		return
+	}
+	defer listener.Close()
+
+	server := transporthttpinjector.NewServer(listener, handler)
 	if err := server.Serve(ctx); err != nil {
 		if err != context.Canceled {
 			log.WithError(err).Error("error serving")

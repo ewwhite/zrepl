@@ -56,5 +56,10 @@ func FromConfig(g *config.Global, in config.ConnectEnum) (Connecter, error) {
 	if errConnecter != nil {
 		return nil, errConnecter
 	}
-	return connecter, nil
+
+	handshakeConnecter := HandshakeConnecter{
+		connecter: connecter,
+	}
+
+	return handshakeConnecter, nil
 }

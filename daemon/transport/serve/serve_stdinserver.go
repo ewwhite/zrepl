@@ -13,12 +13,7 @@ import (
 	"sync/atomic"
 )
 
-type StdinserverListenerFactory struct {
-	ClientIdentities []string
-	Sockdir string
-}
-
-func MultiStdinserverListenerFactoryFromConfig(g *config.Global, in *config.StdinserverServer) (f *multiStdinserverListenerFactory, err error) {
+func MultiStdinserverListenerFactoryFromConfig(g *config.Global, in *config.StdinserverServer) (AuthenticatedListenerFactory,error) {
 
 	for _, ci := range in.ClientIdentities {
 		if err := ValidateClientIdentity(ci); err != nil {
@@ -26,21 +21,14 @@ func MultiStdinserverListenerFactoryFromConfig(g *config.Global, in *config.Stdi
 		}
 	}
 
-	f = &multiStdinserverListenerFactory{
-		ClientIdentities: in.ClientIdentities,
-		Sockdir: g.Serve.StdinServer.SockDir,
+	clientIdentities := in.ClientIdentities
+	sockdir := g.Serve.StdinServer.SockDir
+
+	lf := func() (AuthenticatedListener,error) {
+		return multiStdinserverListenerFromClientIdentities(sockdir, clientIdentities)
 	}
 
-	return
-}
-
-type multiStdinserverListenerFactory struct {
-	ClientIdentities []string
-	Sockdir string
-}
-
-func (f *multiStdinserverListenerFactory) Listen() (AuthenticatedListener, error) {
-	return multiStdinserverListenerFromClientIdentities(f.Sockdir, f.ClientIdentities)
+	return lf, nil
 }
 
 type multiStdinserverAcceptRes struct {

@@ -5,24 +5,20 @@ import (
 	"fmt"
 	"github.com/zrepl/zrepl/daemon/transport/connecter"
 	"github.com/zrepl/zrepl/daemon/transport/serve"
-	"github.com/zrepl/zrepl/replication/pdu"
 	"net"
 	"net/http"
 )
 
-type clientIdentityInjector struct {
-	identity string
-	cl *http.Client
+type contextKey int
+
+const (
+	ContextKeyClientIdentity contextKey = 1 + iota
+)
+
+func ClientIdentity(ctx context.Context) string {
+	s, _ := ctx.Value(ContextKeyClientIdentity).(string)
+	return s
 }
-
-const HEADER = "X-ZREPL-CLIENT-IDENTITY"
-
-func (i clientIdentityInjector) Do(req *http.Request) (*http.Response, error) {
-	req.Header.Set(HEADER, i.identity)
-	return i.cl.Do(req)
-}
-
-var _ pdu.HTTPClient = &clientIdentityInjector{}
 
 func ClientTransport(connecter connecter.Connecter) *http.Transport {
 	return &http.Transport{
@@ -41,7 +37,7 @@ func (i authconnIdentityInjector) ServeHTTP(w http.ResponseWriter, req *http.Req
 	if err := a.FromString(req.RemoteAddr); err != nil {
 		panic(fmt.Sprintf("implementation error: %s %s", req.RemoteAddr, err))
 	}
-	req.Header.Set(HEADER, a.ClientIdentity)
+	req = req.WithContext(context.WithValue(req.Context(), ContextKeyClientIdentity, a.ClientIdentity))
 	i.handler.ServeHTTP(w, req)
 }
 

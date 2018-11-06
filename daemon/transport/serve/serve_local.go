@@ -162,19 +162,13 @@ func (l *LocalListener) Close() error {
 	return nil
 }
 
-type LocalListenerFactory struct {
-	listenerName string
-}
-
-func LocalListenerFactoryFromConfig(g *config.Global, in *config.LocalServe) (f *LocalListenerFactory, err error) {
+func LocalListenerFactoryFromConfig(g *config.Global, in *config.LocalServe) (AuthenticatedListenerFactory,error) {
 	if in.ListenerName == "" {
 		return nil, fmt.Errorf("ListenerName must not be empty")
 	}
-	return &LocalListenerFactory{listenerName: in.ListenerName}, nil
+	listenerName := in.ListenerName
+	lf := func() (AuthenticatedListener,error) {
+		return GetLocalListener(listenerName), nil
+	}
+	return lf, nil
 }
-
-
-func (lf *LocalListenerFactory) Listen() (AuthenticatedListener, error) {
-	return GetLocalListener(lf.listenerName), nil
-}
-

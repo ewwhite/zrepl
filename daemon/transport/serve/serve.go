@@ -6,8 +6,6 @@ import (
 	"github.com/zrepl/zrepl/config"
 	"github.com/zrepl/zrepl/daemon/transport"
 	"net"
-	"github.com/zrepl/zrepl/daemon/streamrpcconfig"
-	"github.com/problame/go-streamrpc"
 	"context"
 	"github.com/zrepl/zrepl/logger"
 	"github.com/zrepl/zrepl/zfs"
@@ -87,22 +85,9 @@ type AuthenticatedListener interface {
 	Close() error
 }
 
-type ListenerFactory interface {
-	Listen() (AuthenticatedListener, error)
-}
+type AuthenticatedListenerFactory func() (AuthenticatedListener,error)
 
-type HandshakeListenerFactory struct {
-	lf ListenerFactory
-}
-
-func (lf HandshakeListenerFactory) Listen() (AuthenticatedListener, error) {
-	l, err := lf.lf.Listen()
-	if err != nil {
-		return nil, err
-	}
-	return HandshakeListener{l}, nil
-}
-
+// wrapper type that performs a a protocol version handshake before returning the connection
 type HandshakeListener struct {
 	l AuthenticatedListener
 }
@@ -127,41 +112,36 @@ func (l HandshakeListener) Accept(ctx context.Context) (*AuthConn, error) {
 	return conn, nil
 }
 
-func FromConfig(g *config.Global, in config.ServeEnum) (lf ListenerFactory, conf *streamrpc.ConnConfig, _ error) {
+func FromConfig(g *config.Global, in config.ServeEnum) (AuthenticatedListenerFactory,error) {
 
 	var (
-		lfError, rpcErr error
+		l AuthenticatedListenerFactory
+		err error
 	)
 	switch v := in.Ret.(type) {
 	case *config.TCPServe:
-		lf, lfError = TCPListenerFactoryFromConfig(g, v)
-		conf, rpcErr = streamrpcconfig.FromDaemonConfig(g, v.RPC)
+		l, err = TCPListenerFactoryFromConfig(g, v)
 	case *config.TLSServe:
-		lf, lfError = TLSListenerFactoryFromConfig(g, v)
-		conf, rpcErr = streamrpcconfig.FromDaemonConfig(g, v.RPC)
+		l, err = TLSListenerFactoryFromConfig(g, v)
 	case *config.StdinserverServer:
-		lf, lfError = MultiStdinserverListenerFactoryFromConfig(g, v)
-		conf, rpcErr = streamrpcconfig.FromDaemonConfig(g, v.RPC)
+		l, err = MultiStdinserverListenerFactoryFromConfig(g, v)
 	case *config.LocalServe:
-		lf, lfError = LocalListenerFactoryFromConfig(g, v)
-		conf, rpcErr = streamrpcconfig.FromDaemonConfig(g, v.RPC)
+		l, err = LocalListenerFactoryFromConfig(g, v)
 	default:
-		return nil, nil, errors.Errorf("internal error: unknown serve type %T", v)
+		return nil, errors.Errorf("internal error: unknown serve type %T", v)
 	}
 
-	if lfError != nil {
-		return nil, nil, lfError
-	}
-	if rpcErr != nil {
-		return nil, nil, rpcErr
+	if err != nil {
+		return nil, err
 	}
 
-	lf = HandshakeListenerFactory{lf}
-
-	return lf, conf, nil
-
+	handshakeLF := func() (AuthenticatedListener,error) {
+		underlyingListener, err := l()
+		if err != nil {
+			return nil, err
+		}
+		return HandshakeListener{underlyingListener}, nil
+	}
+	return handshakeLF, nil
 }
 
-type AuthenticatedHTTPProxy struct {
-
-}

@@ -14,10 +14,11 @@ import (
 	"github.com/zrepl/zrepl/daemon/transport/connecter"
 	"github.com/zrepl/zrepl/daemon/transport/transporthttpinjector"
 	"github.com/zrepl/zrepl/endpoint"
+	"github.com/zrepl/zrepl/endpoint/tokenstore"
 	"github.com/zrepl/zrepl/replication"
-	"github.com/zrepl/zrepl/replication/pdu"
 	"github.com/zrepl/zrepl/util/envconst"
 	"github.com/zrepl/zrepl/zfs"
+	"net/http"
 	"sync"
 	"time"
 )
@@ -26,6 +27,9 @@ type ActiveSide struct {
 	mode          activeMode
 	name          string
 	connecter	  connecter.Connecter
+
+	tokenStore 	*tokenstore.Store
+	tokenStoreStop tokenstore.StopExpirationFunc
 
 	prunerFactory *pruner.PrunerFactory
 
@@ -78,7 +82,7 @@ func (a *ActiveSide) updateTasks(u func(*activeSideTasks)) activeSideTasks {
 }
 
 type activeMode interface {
-	SenderReceiver(client pdu.HTTPClient) (replication.Sender, replication.Receiver)
+	SenderReceiver(tokenStore endpoint.TokenStore, transport *http.Transport) (replication.Sender, replication.Receiver)
 	Type() Type
 	RunPeriodic(ctx context.Context, wakeUpCommon chan<- struct{})
 }
@@ -88,10 +92,10 @@ type modePush struct {
 	snapper *snapper.PeriodicOrManual
 }
 
-func (m *modePush) SenderReceiver(client pdu.HTTPClient) (replication.Sender, replication.Receiver) {
-	sender := endpoint.NewSender(m.fsfilter)
-	receiver := endpoint.NewClient(client)
-	return sender, receiver
+func (m *modePush) SenderReceiver(tokenStore endpoint.TokenStore, transport *http.Transport) (replication.Sender, replication.Receiver) {
+	sender := endpoint.NewSender(m.fsfilter, tokenStore)
+	receiver := endpoint.NewClient(transport)
+	return endpoint.NewLocal(sender), receiver
 }
 
 func (m *modePush) Type() Type { return TypePush }
@@ -121,10 +125,10 @@ type modePull struct {
 	interval time.Duration
 }
 
-func (m *modePull) SenderReceiver(client pdu.HTTPClient) (replication.Sender, replication.Receiver) {
-	sender := endpoint.NewClient(client)
-	receiver := endpoint.NewReceiver(m.rootFS)
-	return sender, receiver
+func (m *modePull) SenderReceiver(tokenStore endpoint.TokenStore, transport *http.Transport) (replication.Sender, replication.Receiver) {
+	sender := endpoint.NewClient(transport)
+	receiver := endpoint.NewReceiver(m.rootFS, tokenStore)
+	return sender, endpoint.NewLocal(receiver)
 }
 
 func (*modePull) Type() Type { return TypePull }
@@ -190,8 +194,12 @@ func activeSide(g *config.Global, in *config.ActiveJob, mode activeMode) (j *Act
 	if err != nil {
 		return nil, errors.Wrap(err, "cannot build client")
 	}
+	j.tokenStore, j.tokenStoreStop, err = tokenstore.NewWithRandomKey()
+	if err != nil {
+		return nil, errors.Wrap(err, "cannot build token store")
+	}
 
-	j.promPruneSecs = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		j.promPruneSecs = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace:   "zrepl",
 		Subsystem:   "pruning",
 		Name:        "time",
@@ -202,6 +210,7 @@ func activeSide(g *config.Global, in *config.ActiveJob, mode activeMode) (j *Act
 	if err != nil {
 		return nil, err
 	}
+
 
 	return j, nil
 }
@@ -241,6 +250,8 @@ func (j *ActiveSide) Run(ctx context.Context) {
 	ctx = logging.WithSubsystemLoggers(ctx, log)
 
 	defer log.Info("job exiting")
+
+	defer j.tokenStoreStop()
 
 	periodicDone := make(chan struct{})
 	ctx, cancel := context.WithCancel(ctx)
@@ -354,8 +365,8 @@ func (j *ActiveSide) do(ctx context.Context) {
 		}
 	}()
 
-	client := transporthttpinjector.Client(j.connecter)
-	sender, receiver := j.mode.SenderReceiver(client)
+	transport := transporthttpinjector.ClientTransport(j.connecter)
+	sender, receiver := j.mode.SenderReceiver(j.tokenStore, transport)
 
 	{
 		select {

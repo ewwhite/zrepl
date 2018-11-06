@@ -7,11 +7,6 @@ import (
 	"context"
 )
 
-type TCPListenerFactory struct {
-	address *net.TCPAddr
-	clientMap *ipMap
-}
-
 type ipMapEntry struct {
 	ip net.IP
 	ident string
@@ -45,7 +40,7 @@ func (m *ipMap) Get(ip net.IP) (string, error) {
 	return "", errors.Errorf("no identity mapping for client IP %s", ip)
 }
 
-func TCPListenerFactoryFromConfig(c *config.Global, in *config.TCPServe) (*TCPListenerFactory, error) {
+func TCPListenerFactoryFromConfig(c *config.Global, in *config.TCPServe) (AuthenticatedListenerFactory, error) {
 	addr, err := net.ResolveTCPAddr("tcp", in.Listen)
 	if err != nil {
 		return nil, errors.Wrap(err, "cannot parse listen address")
@@ -54,19 +49,14 @@ func TCPListenerFactoryFromConfig(c *config.Global, in *config.TCPServe) (*TCPLi
 	if err != nil {
 		return nil, errors.Wrap(err, "cannot parse client IP map")
 	}
-	lf := &TCPListenerFactory{
-		address: addr,
-		clientMap: clientMap,
+	lf := func() (AuthenticatedListener, error) {
+		l, err := net.ListenTCP("tcp", addr)
+		if err != nil {
+			return nil, err
+		}
+		return &TCPAuthListener{l, clientMap}, nil
 	}
 	return lf, nil
-}
-
-func (f *TCPListenerFactory) Listen() (AuthenticatedListener, error) {
-	l, err := net.ListenTCP("tcp", f.address)
-	if err != nil {
-		return nil, err
-	}
-	return &TCPAuthListener{l, f.clientMap}, nil
 }
 
 type TCPAuthListener struct {

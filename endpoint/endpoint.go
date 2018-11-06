@@ -5,12 +5,12 @@ import (
 	"context"
 	"fmt"
 	"github.com/pkg/errors"
+	"github.com/zrepl/zrepl/daemon/transport/transporthttpinjector"
 	"github.com/zrepl/zrepl/replication"
 	"github.com/zrepl/zrepl/replication/pdu"
 	"github.com/zrepl/zrepl/util/envconst"
 	"github.com/zrepl/zrepl/zfs"
 	"io"
-	"net"
 	"net/http"
 	"path"
 	"strings"
@@ -184,7 +184,7 @@ type FSMap interface { // FIXME unused
 
 // Receiver implements replication.ReplicationEndpoint for a receiving side
 type Receiver struct {
-	root *zfs.DatasetPath
+	rootWithoutClientComponent *zfs.DatasetPath
 	tokenStore TokenStore
 }
 
@@ -194,7 +194,38 @@ func NewReceiver(rootDataset *zfs.DatasetPath, tokenStore TokenStore) (*Receiver
 	if rootDataset.Length() <= 0 {
 		panic(fmt.Sprintf("root dataset must not be an empty path: %v", rootDataset))
 	}
-	return &Receiver{root: rootDataset.Copy(), tokenStore: tokenStore}
+	return &Receiver{rootWithoutClientComponent: rootDataset.Copy(), tokenStore: tokenStore}
+}
+
+func TestClientIdentity(rootFS *zfs.DatasetPath, clientIdentity string) error {
+	_, err := clientRoot(rootFS, clientIdentity)
+	return err
+}
+
+func clientRoot(rootFS *zfs.DatasetPath, clientIdentity string) (*zfs.DatasetPath, error) {
+	rootFSLen := rootFS.Length()
+	clientRootStr := path.Join(rootFS.ToString(), clientIdentity)
+	clientRoot, err := zfs.NewDatasetPath(clientRootStr)
+	if err != nil {
+		return nil, err
+	}
+	if rootFSLen + 1 != clientRoot.Length() {
+		return nil, fmt.Errorf("client identity must be a single ZFS filesystem path component")
+	}
+	return clientRoot, nil
+}
+
+func (s *Receiver) clientRootFromCtx(ctx context.Context) (*zfs.DatasetPath) {
+	clientIdentity := transporthttpinjector.ClientIdentity(ctx)
+	if clientIdentity == "" {
+		panic(fmt.Sprintf("transporthttpinjector.ClientIdentity must be set"))
+	}
+
+	clientRoot, err := clientRoot(s.rootWithoutClientComponent, clientIdentity)
+	if err != nil {
+		panic(fmt.Sprintf("ClientIdentityContextKey must have been validated before invoking Receiver: %s", err))
+	}
+	return clientRoot
 }
 
 type subroot struct {
@@ -223,7 +254,8 @@ func (f subroot) MapToLocal(fs string) (*zfs.DatasetPath, error) {
 
 
 func (s *Receiver) ListFilesystems(ctx context.Context, req *pdu.ListFilesystemReq) (*pdu.ListFilesystemRes, error) {
-	filtered, err := zfs.ZFSListMapping(subroot{s.root})
+	root := s.clientRootFromCtx(ctx)
+	filtered, err := zfs.ZFSListMapping(subroot{root})
 	if err != nil {
 		return nil, err
 	}
@@ -241,14 +273,15 @@ func (s *Receiver) ListFilesystems(ctx context.Context, req *pdu.ListFilesystemR
 		if ph {
 			continue
 		}
-		a.TrimPrefix(s.root)
+		a.TrimPrefix(root)
 		fss = append(fss, &pdu.Filesystem{Path: a.ToString()})
 	}
 	return &pdu.ListFilesystemRes{Filesystems: fss}, nil
 }
 
 func (s *Receiver) ListFilesystemVersions(ctx context.Context, req *pdu.ListFilesystemVersionsReq) (*pdu.ListFilesystemVersionsRes, error) {
-	lp, err := subroot{s.root}.MapToLocal(req.GetFilesystem())
+	root := s.clientRootFromCtx(ctx)
+	lp, err := subroot{root}.MapToLocal(req.GetFilesystem())
 	if err != nil {
 		return nil, err
 	}
@@ -277,15 +310,20 @@ func (s *Receiver) DoSend(token string) (io.ReadCloser, error) {
 	return nil, fmt.Errorf("DoSend not implemented for Receiver")
 }
 
-func (s *Receiver) GetReceiveToken(ctx context.Context, req *pdu.ReceiveTokenReq) (*pdu.ReceiveTokenRes, error) {
+type receiveToken struct {
+	clientRoot *zfs.DatasetPath
+	req *pdu.ReceiveTokenReq
+}
 
-	_, err := subroot{s.root}.MapToLocal(req.Filesystem)
+func (s *Receiver) GetReceiveToken(ctx context.Context, req *pdu.ReceiveTokenReq) (*pdu.ReceiveTokenRes, error) {
+	root := s.clientRootFromCtx(ctx)
+	_, err := subroot{root}.MapToLocal(req.Filesystem)
 	if err != nil {
 		return nil, err
 	}
 
 	expTime := time.Now().Add(envconst.Duration("ENDPOINT_RECEIVER_TOKEN_EXPIRATION", 10*time.Second))
-	token, err := s.tokenStore.Add(req, expTime)
+	token, err := s.tokenStore.Add(receiveToken{clientRoot: root, req: req}, expTime)
 	if err != nil {
 		return nil, err
 	}
@@ -299,9 +337,9 @@ func (s *Receiver) DoReceive(token string, zfsStream io.ReadCloser) error {
 	if err != nil {
 		return err
 	}
-	r := rI.(*pdu.ReceiveTokenReq)
+	r := rI.(receiveToken)
 
-	lp, err := subroot{s.root}.MapToLocal(r.Filesystem) // FIXME this work has already been done
+	lp, err := subroot{r.clientRoot}.MapToLocal(r.req.Filesystem) // FIXME this work has already been done
 	if err != nil {
 		return err
 	}
@@ -366,7 +404,8 @@ func (s *Receiver) DoReceive(token string, zfsStream io.ReadCloser) error {
 }
 
 func (s *Receiver) DestroySnapshots(ctx context.Context, req *pdu.DestroySnapshotsReq) (*pdu.DestroySnapshotsRes, error) {
-	lp, err := subroot{s.root}.MapToLocal(req.Filesystem)
+	root := s.clientRootFromCtx(ctx)
+	lp, err := subroot{root}.MapToLocal(req.Filesystem)
 	if err != nil {
 		return nil, err
 	}
@@ -409,8 +448,8 @@ type ReplicationServer interface {
 	DoReceive(token string, zfsStream io.ReadCloser) error
 }
 
-// HttpServer implements http.Handler for a Receiver or Sender
-type HttpServer struct {
+// HttpHandler implements http.Handler for a Receiver or Sender
+type HttpHandler struct {
 	mux *http.ServeMux
 	srv ReplicationServer
 }
@@ -429,31 +468,23 @@ func init() {
 	}
 }
 
-func NewServer(listener net.Listener, srv ReplicationServer) *HttpServer {
-	s := &HttpServer{
+func ToHandler(srv ReplicationServer) *HttpHandler {
+	h := &HttpHandler{
 		mux: http.NewServeMux(),
 		srv: srv,
 	}
-	twirpHandler := pdu.NewReplicationServerServer(s.srv, nil)
-	s.mux.Handle(pdu.ReplicationServerPathPrefix, twirpHandler)
-	s.mux.HandleFunc(DoSendPathPrefix, func(w http.ResponseWriter, r *http.Request) {
-		s.handleSendRecv(0, w, r)
+	twirpHandler := pdu.NewReplicationServerServer(h.srv, nil)
+	h.mux.Handle(pdu.ReplicationServerPathPrefix, twirpHandler)
+	h.mux.HandleFunc(DoSendPathPrefix, func(w http.ResponseWriter, r *http.Request) {
+		h.handleSendRecv(0, w, r)
 	})
-	s.mux.HandleFunc(DoReceivePathPrefix, func(w http.ResponseWriter, r *http.Request) {
-		s.handleSendRecv(1, w, r)
+	h.mux.HandleFunc(DoReceivePathPrefix, func(w http.ResponseWriter, r *http.Request) {
+		h.handleSendRecv(1, w, r)
 	})
-
-	httpServer := http.Server{
-		// TODO ErrorLog
-		Handler: s.mux,
-	}
-	httpServer.Serve(listener)
-
-
-	return s
+	return h
 }
 
-func (s *HttpServer) handleSendRecv(mode int, w http.ResponseWriter, r *http.Request) {
+func (s *HttpHandler) handleSendRecv(mode int, w http.ResponseWriter, r *http.Request) {
 
 	// decode token from URL
 	token := path.Base(r.URL.Path)
@@ -489,12 +520,18 @@ func (s *HttpServer) handleSendRecv(mode int, w http.ResponseWriter, r *http.Req
 	}
 }
 
-func (s *HttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.ServeHTTP(w, r)
+
+func (s *HttpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	client_identity := transporthttpinjector.ClientIdentity(r.Context())
+	if client_identity == "" {
+		panic(fmt.Sprintf("implementation error: endpoint.HttpHandler used outside of transporthttpinjector: %s", r.RemoteAddr))
+	}
+	s.mux.ServeHTTP(w, r)
 }
 
-// Client implements the interfaces required by package replication
-type Client struct {
+// HttpClient implements the interfaces required by package replication
+// for a remote instance of ReplicationServer
+type HttpClient struct {
 	transport *http.Transport
 	twirpHttpClient    http.Client
 	bulkTransferClient http.Client
@@ -502,23 +539,23 @@ type Client struct {
 	pdu.ReplicationServer // this the twirp client instance, see constructor
 }
 
-var _ replication.Endpoint = &Client{}
-var _ replication.Sender = &Client{}
-var _ replication.Receiver = &Client{}
+var _ replication.Endpoint = &HttpClient{}
+var _ replication.Sender = &HttpClient{}
+var _ replication.Receiver = &HttpClient{}
 
-func NewClient(transport *http.Transport) *Client {
+func NewClient(transport *http.Transport) *HttpClient {
 	twirpHttpClient := http.Client{Transport: transport}
 	bulkTransferClient := http.Client{Transport: transport}
-	c := &Client{
+	c := &HttpClient{
 		transport: transport,
 		twirpHttpClient: twirpHttpClient,
 		bulkTransferClient: bulkTransferClient,
 	}
-	c.ReplicationServer = pdu.NewReplicationServerProtobufClient("/", &c.twirpHttpClient) // '/' could be anything
+	c.ReplicationServer = pdu.NewReplicationServerProtobufClient("http://daemon", &c.twirpHttpClient) // '/' could be anything
 	return c
 }
 
-func (c *Client) Send(ctx context.Context, r *pdu.SendTokenReq) (*pdu.SendTokenRes, io.ReadCloser, error) {
+func (c *HttpClient) Send(ctx context.Context, r *pdu.SendTokenReq) (*pdu.SendTokenRes, io.ReadCloser, error) {
 	res, err := c.ReplicationServer.GetSendToken(ctx, r)
 	if err != nil {
 		return nil, nil, err
@@ -540,7 +577,7 @@ func (c *Client) Send(ctx context.Context, r *pdu.SendTokenReq) (*pdu.SendTokenR
 	return res, sendRes.Body, nil
 }
 
-func (c *Client) Receive(ctx context.Context, r *pdu.ReceiveTokenReq, sendStream io.ReadCloser) error {
+func (c *HttpClient) Receive(ctx context.Context, r *pdu.ReceiveTokenReq, sendStream io.ReadCloser) error {
 	defer sendStream.Close()
 
 	res, err := c.ReplicationServer.GetReceiveToken(ctx, r)
@@ -557,6 +594,47 @@ func (c *Client) Receive(ctx context.Context, r *pdu.ReceiveTokenReq, sendStream
 		var errorMsg strings.Builder
 		io.Copy(&errorMsg, io.LimitReader(receiveRes.Body, 1 << 15)) // TODO error handling?
 		return fmt.Errorf("remote receive error: %s", strings.TrimSpace(errorMsg.String()))
+	}
+	return nil
+}
+
+type LocalClient struct {
+	ReplicationServer // instance of Sender or Receiver
+}
+
+var _ replication.Endpoint = &LocalClient{}
+var _ replication.Sender = &LocalClient{}
+var _ replication.Receiver = &LocalClient{}
+
+func NewLocal(server ReplicationServer) *LocalClient {
+	return &LocalClient{ReplicationServer: server}
+}
+
+func (c LocalClient) Send(ctx context.Context, r *pdu.SendTokenReq) (*pdu.SendTokenRes, io.ReadCloser, error) {
+	res, err := c.ReplicationServer.GetSendToken(ctx, r)
+	if err != nil {
+		return nil, nil, err
+	}
+	if r.DryRun {
+		return res, nil, nil
+	}
+
+	stream, err := c.ReplicationServer.DoSend(res.GetSendToken())
+	if err != nil {
+		return nil, nil, err
+	}
+	return res, stream, nil
+}
+
+func (c LocalClient) Receive(ctx context.Context, r *pdu.ReceiveTokenReq, sendStream io.ReadCloser) error {
+	defer sendStream.Close()
+	res, err := c.ReplicationServer.GetReceiveToken(ctx, r)
+	if err != nil {
+		return err
+	}
+	err = c.ReplicationServer.DoReceive(res.GetReceiveToken(), sendStream)
+	if err != nil {
+		return err
 	}
 	return nil
 }
