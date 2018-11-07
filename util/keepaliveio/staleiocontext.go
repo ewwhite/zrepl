@@ -39,12 +39,12 @@ var KeepaliveReadTimeout = fmt.Errorf("keepaliveio: reader timed out, nooping al
 type ReadCloserConstructor func(ctx context.Context) (io.ReadCloser, error)
 
 // the returned error can only be from constructor
-func NewKeepaliveReadCloser(ctx context.Context, timeout time.Duration, constructor ReadCloserConstructor) (context.Context, *KeepaliveReadCloser, error) {
+func NewKeepaliveReadCloser(ctx context.Context, timeout time.Duration, constructor ReadCloserConstructor) (context.Context, context.CancelFunc, *KeepaliveReadCloser, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	rc, err := constructor(ctx)
 	if err != nil {
 		cancel()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	karc := &KeepaliveReadCloser{
 		onClose: cancel,
@@ -53,7 +53,7 @@ func NewKeepaliveReadCloser(ctx context.Context, timeout time.Duration, construc
 		timeoutSig: make(chan struct{}, 1),
 		readWork: make(chan *readWork, 1),
 	}
-	go karc.readWorker()
+	go karc.readWorker(ctx)
 	go func() {
 		t := time.NewTicker(timeout)
 		defer t.Stop()
@@ -76,7 +76,7 @@ func NewKeepaliveReadCloser(ctx context.Context, timeout time.Duration, construc
 			}
 		}
 	}()
-	return ctx, karc, nil
+	return ctx, cancel, karc, nil
 }
 
 func DidTimeOut(r io.ReadCloser) (didTimeOut bool, ok bool) {
@@ -93,9 +93,11 @@ func (r *KeepaliveReadCloser) TimedOut() bool {
 	return r.timedOut
 }
 
-func (r *KeepaliveReadCloser) readWorker() {
+func (r *KeepaliveReadCloser) readWorker(ctx context.Context) {
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case <-r.timeoutSig:
 			return
 		case w := <-r.readWork:
