@@ -83,20 +83,26 @@ func (a *ActiveSide) updateTasks(u func(*activeSideTasks)) activeSideTasks {
 }
 
 type activeMode interface {
-	SenderReceiver(tokenStore endpoint.TokenStore, dialFunc endpoint.DialContextFunc, clientConfig endpoint.HttpClientConfig) (replication.Sender, replication.Receiver)
+	Setup(tokenStore endpoint.TokenStore, dialFunc endpoint.DialContextFunc, clientConfig endpoint.HttpClientConfig)
+	SenderReceiver() (replication.Sender, replication.Receiver)
 	Type() Type
 	RunPeriodic(ctx context.Context, wakeUpCommon chan<- struct{})
 }
 
 type modePush struct {
-	fsfilter         endpoint.FSFilter
-	snapper *snapper.PeriodicOrManual
+	sender   *endpoint.LocalClient
+	receiver *endpoint.HttpClient
+	fsfilter endpoint.FSFilter
+	snapper  *snapper.PeriodicOrManual
 }
 
-func (m *modePush) SenderReceiver(tokenStore endpoint.TokenStore, dialFunc endpoint.DialContextFunc, clientConfig endpoint.HttpClientConfig) (replication.Sender, replication.Receiver) {
-	sender := endpoint.NewSender(m.fsfilter, tokenStore)
-	receiver := endpoint.NewClient(dialFunc, clientConfig)
-	return endpoint.NewLocal(sender), receiver
+func (m *modePush) Setup(tokenStore endpoint.TokenStore, dialFunc endpoint.DialContextFunc, clientConfig endpoint.HttpClientConfig) {
+	m.sender = endpoint.NewLocal(endpoint.NewSender(m.fsfilter, tokenStore))
+	m.receiver = endpoint.NewClient(dialFunc, clientConfig)
+}
+
+func (m *modePush) SenderReceiver() (replication.Sender, replication.Receiver) {
+	return m.sender, m.receiver
 }
 
 func (m *modePush) Type() Type { return TypePush }
@@ -122,14 +128,19 @@ func modePushFromConfig(g *config.Global, in *config.PushJob) (*modePush, error)
 }
 
 type modePull struct {
+	receiver *endpoint.LocalClient
+	sender   *endpoint.HttpClient
 	rootFS   *zfs.DatasetPath
 	interval time.Duration
 }
 
-func (m *modePull) SenderReceiver(tokenStore endpoint.TokenStore, dialFunc endpoint.DialContextFunc, clientConfig endpoint.HttpClientConfig) (replication.Sender, replication.Receiver) {
-	sender := endpoint.NewClient(dialFunc, clientConfig)
-	receiver := endpoint.NewReceiver(m.rootFS, tokenStore)
-	return sender, endpoint.NewLocal(receiver)
+func (m *modePull) Setup(tokenStore endpoint.TokenStore, dialFunc endpoint.DialContextFunc, clientConfig endpoint.HttpClientConfig) {
+	m.receiver = endpoint.NewLocal(endpoint.NewReceiver(m.rootFS, tokenStore))
+	m.sender = endpoint.NewClient(dialFunc, clientConfig)
+}
+
+func (m *modePull) SenderReceiver() (replication.Sender, replication.Receiver) {
+	return m.sender, m.receiver
 }
 
 func (*modePull) Type() Type { return TypePull }
@@ -203,6 +214,9 @@ func activeSide(g *config.Global, in *config.ActiveJob, mode activeMode) (j *Act
 	if err := j.validatedClientConfig.FromConfig(g, in.RPC); err != nil {
 		return nil, errors.Wrap(err, "invalid rpc client config")
 	}
+
+	transport := transporthttpinjector.ClientTransport(j.connecter)
+	j.mode.Setup(j.tokenStore, transport, j.validatedClientConfig)
 
 	j.promPruneSecs = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace:   "zrepl",
@@ -370,8 +384,7 @@ func (j *ActiveSide) do(ctx context.Context) {
 		}
 	}()
 
-	transport := transporthttpinjector.ClientTransport(j.connecter)
-	sender, receiver := j.mode.SenderReceiver(j.tokenStore, transport, j.validatedClientConfig)
+	sender, receiver := j.mode.SenderReceiver()
 
 	{
 		select {

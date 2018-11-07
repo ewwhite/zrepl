@@ -147,9 +147,11 @@ func Default(i interface{}) {
 }
 
 type RPCClientConfig struct {
-	RPCCallTimeout      time.Duration `yaml:"rpc_call_timeout,optional,positive,default=1m"`
-	SendCallIdleTimeout time.Duration `yaml:"send_call_idle_timeout,optional,positive,default=10s"`
-	RecvCallIdleTimeout time.Duration `yaml:"recv_call_idle_timeout,optional,positive,default=10s"`
+	MaxIdleConns  		int 		  `yaml:"max_idle_conns,optional,zeropositive,default=10"`
+	IdleConnTimeout		time.Duration `yaml:"idle_conn_timeout,optional,zeropositive,default=10s"`
+	RPCCallTimeout      time.Duration `yaml:"rpc_call_timeout,optional,zeropositive,default=1m"`
+	SendCallIdleTimeout time.Duration `yaml:"send_call_idle_timeout,optional,zeropositive,default=10s"`
+	RecvCallIdleTimeout time.Duration `yaml:"recv_call_idle_timeout,optional,zeropositive,default=10s"`
 }
 
 type ConnectEnum struct {
@@ -163,7 +165,7 @@ type ConnectCommon struct {
 type TCPConnect struct {
 	ConnectCommon `yaml:",inline"`
 	Address       string        `yaml:"address"`
-	DialTimeout   time.Duration `yaml:"dial_timeout,positive,default=10s"`
+	DialTimeout   time.Duration `yaml:"dial_timeout,zeropositive,default=10s"`
 }
 
 type TLSConnect struct {
@@ -173,7 +175,7 @@ type TLSConnect struct {
 	Cert          string        `yaml:"cert"`
 	Key           string        `yaml:"key"`
 	ServerCN      string        `yaml:"server_cn"`
-	DialTimeout   time.Duration `yaml:"dial_timeout,positive,default=10s"`
+	DialTimeout   time.Duration `yaml:"dial_timeout,zeropositive,default=10s"`
 }
 
 type SSHStdinserverConnect struct {
@@ -185,7 +187,7 @@ type SSHStdinserverConnect struct {
 	TransportOpenCommand []string      `yaml:"transport_open_command,optional"` //TODO unused
 	SSHCommand           string        `yaml:"ssh_command,optional"`            //TODO unused
 	Options              []string      `yaml:"options,optional"`
-	DialTimeout          time.Duration `yaml:"dial_timeout,positive,default=10s"`
+	DialTimeout          time.Duration `yaml:"dial_timeout,zeropositive,default=10s"`
 }
 
 type LocalConnect struct {
@@ -199,8 +201,8 @@ type ServeEnum struct {
 }
 
 type RPCServerConfig struct {
-	ZFSSendIdleTimeout             time.Duration `yaml:"zfs_send_idle_timeout,optional,positive,default=10s"`
-	ZFSReceiveIdleTimeout          time.Duration `yaml:"zfs_recv_idle_timeout,optional,positive,default=10s"`
+	ZFSSendIdleTimeout             time.Duration `yaml:"zfs_send_idle_timeout,optional,zeropositive,default=10s"`
+	ZFSReceiveIdleTimeout          time.Duration `yaml:"zfs_recv_idle_timeout,optional,zeropositive,default=10s"`
 }
 
 type ServeCommon struct {
@@ -220,7 +222,7 @@ type TLSServe struct {
 	Cert             string        `yaml:"cert"`
 	Key              string        `yaml:"key"`
 	ClientCNs        []string      `yaml:"client_cns"`
-	HandshakeTimeout time.Duration `yaml:"handshake_timeout,positive,default=10s"`
+	HandshakeTimeout time.Duration `yaml:"handshake_timeout,zeropositive,default=10s"`
 }
 
 type StdinserverServer struct {

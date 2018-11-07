@@ -620,12 +620,20 @@ type HttpClient struct {
 }
 
 type HttpClientConfig struct {
+	MaxIdleConns		int
+	IdleConnTimeout     time.Duration
 	RPCCallTimeout      time.Duration
 	SendCallIdleTimeout time.Duration
 	RecvCallIdleTimeout time.Duration
 }
 
 func (c HttpClientConfig) Validate() error {
+	if c.MaxIdleConns < 0 {
+		return fmt.Errorf("MaxIdleConns must be 0 or positive")
+	}
+	if c.IdleConnTimeout < 0 {
+		return fmt.Errorf("IdleConnTimeout must be 0 or positive")
+	}
 	if c.RPCCallTimeout < 0 {
 		return fmt.Errorf("RPCCallTimeout must be 0 or positive")
 	}
@@ -639,6 +647,8 @@ func (c HttpClientConfig) Validate() error {
 }
 
 func (c *HttpClientConfig) FromConfig(global *config.Global, serverConfig *config.RPCClientConfig) error {
+	c.MaxIdleConns = serverConfig.MaxIdleConns
+	c.IdleConnTimeout = serverConfig.IdleConnTimeout
 	c.RPCCallTimeout = serverConfig.RPCCallTimeout
 	c.SendCallIdleTimeout = serverConfig.SendCallIdleTimeout
 	c.RecvCallIdleTimeout = serverConfig.RecvCallIdleTimeout
@@ -661,12 +671,16 @@ func NewClient(dialFunc DialContextFunc, config HttpClientConfig) *HttpClient {
 		Timeout: config.RPCCallTimeout, // full request timeout
 		Transport: &http.Transport{
 			DialContext: dialFunc,
+			IdleConnTimeout: config.IdleConnTimeout,
+			MaxIdleConns: config.MaxIdleConns,
 		},
 	}
 	sendClient := http.Client{
 		Timeout: 0, // can't do full request timeouts, we use package keepaliveio
 		Transport: &http.Transport{
 			DialContext: dialFunc,
+			IdleConnTimeout: config.IdleConnTimeout,
+			MaxIdleConns: config.MaxIdleConns,
 			ResponseHeaderTimeout: config.RPCCallTimeout,
 		},
 	}
@@ -674,6 +688,8 @@ func NewClient(dialFunc DialContextFunc, config HttpClientConfig) *HttpClient {
 		Timeout: 0, // can't do full request timeouts, we use package keepaliveio
 		Transport: &http.Transport{
 			DialContext: dialFunc,
+			IdleConnTimeout: config.IdleConnTimeout,
+			MaxIdleConns: config.MaxIdleConns,
 			// do _not_ use any header timeout here since the Post takes arbitrarily long (rely on keepaliveio on local zfs send instead)
 		},
 	}
@@ -688,6 +704,7 @@ func NewClient(dialFunc DialContextFunc, config HttpClientConfig) *HttpClient {
 	return c
 }
 
+// callers must ensure that the returned io.ReadCloser is closed
 func (c *HttpClient) Send(ctx context.Context, r *pdu.SendTokenReq) (*pdu.SendTokenRes, io.ReadCloser, error) {
 	res, err := c.ReplicationServer.GetSendToken(ctx, r)
 	if err != nil {
@@ -757,6 +774,7 @@ func (c *HttpClient) Receive(ctx context.Context, r *pdu.ReceiveTokenReq, sendSt
 
 		url := fmt.Sprintf("http://daemon%s%s", DoReceivePathPrefix, res.GetReceiveToken())
 		receiveRes, err = c.recvClient.Post(url, "application/octet-stream", sendStream) // no shadowing!
+		defer receiveRes.Body.Close()
 		if didTO, ok := keepaliveio.DidTimeOut(sendStream); ok && didTO {
 			err = fmt.Errorf("recv call idle timeout excceeded")
 		}
