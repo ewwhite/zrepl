@@ -535,12 +535,14 @@ func (s *HttpHandler) handleSendRecv(mode int, w http.ResponseWriter, r *http.Re
 			err error
 		)
 		if s.config.ZFSSendIdleTimeout != 0 {
-			_, stream, err = keepaliveio.NewKeepaliveReadCloser(
+			var cancel context.CancelFunc
+			_, cancel, stream, err = keepaliveio.NewKeepaliveReadCloser(
 				r.Context(),
 				s.config.ZFSSendIdleTimeout,
 				func(ctx context.Context) (io.ReadCloser, error) {
 					return s.srv.DoSend(r.Context(), token)
 				})
+			defer cancel()
 		} else { // avoid performance hit
 			stream, err = s.srv.DoSend(r.Context(), token)
 		}
@@ -565,12 +567,14 @@ func (s *HttpHandler) handleSendRecv(mode int, w http.ResponseWriter, r *http.Re
 			stream io.ReadCloser
 		)
 		if s.config.ZFSReceiveIdleTimeout != 0 {
-			ctx, stream, _ = keepaliveio.NewKeepaliveReadCloser(
+			var cancel context.CancelFunc
+			ctx, cancel, stream, _ = keepaliveio.NewKeepaliveReadCloser(
 				r.Context(),
 				s.config.ZFSReceiveIdleTimeout,
 				func(ctx context.Context) (io.ReadCloser, error) {
 					return r.Body, nil
 			})
+			defer cancel()
 		} else {
 			ctx = r.Context()
 			stream = r.Body
@@ -701,7 +705,7 @@ func (c *HttpClient) Send(ctx context.Context, r *pdu.SendTokenReq) (*pdu.SendTo
 
 	var stream io.ReadCloser
 	if c.config.SendCallIdleTimeout > 0 {
-		_, stream, _ = keepaliveio.NewKeepaliveReadCloser(ctx, c.config.SendCallIdleTimeout, func(ctx context.Context) (io.ReadCloser, error) {
+		_, _, stream, _ = keepaliveio.NewKeepaliveReadCloser(ctx, c.config.SendCallIdleTimeout, func(ctx context.Context) (io.ReadCloser, error) {
 			return sendRes.Body, nil
 		})
 	} else {
@@ -725,47 +729,56 @@ func (c *HttpClient) Receive(ctx context.Context, r *pdu.ReceiveTokenReq, sendSt
 		return err
 	}
 
-	if c.config.RecvCallIdleTimeout > 0 {
-		originalSendStream := sendStream
-		defer originalSendStream.Close()
+	// do the actual recv
+	var receiveRes *http.Response
+	{
+		ctx := ctx // shadow to avoid
+		if c.config.RecvCallIdleTimeout > 0 {
+			originalSendStream := sendStream
+			defer originalSendStream.Close()
+			var cancel context.CancelFunc
+			ctx, cancel, sendStream, _ = keepaliveio.NewKeepaliveReadCloser( // shadowing!
+				ctx,
+				c.config.RecvCallIdleTimeout,
+				func(ctx context.Context) (io.ReadCloser, error) {
+					return sendStream, nil
+				},
+			)
+			defer cancel()
+			go func() {
+				<-ctx.Done()
+				getLogger(ctx).Debug("keepalive reader context done, closing original send stream")
+				originalSendStream.Close()
+				getLogger(ctx).Debug("send stream closed")
+			}()
+		}
 
-		ctx, sendStream, _ = keepaliveio.NewKeepaliveReadCloser( // shadowing!
-			ctx,
-			c.config.RecvCallIdleTimeout,
+		getLogger(ctx).WithField("send_stream_type", fmt.Sprintf("%T", sendStream)).Debug("send stream wrapped")
+
+		url := fmt.Sprintf("http://daemon%s%s", DoReceivePathPrefix, res.GetReceiveToken())
+		receiveRes, err = c.recvClient.Post(url, "application/octet-stream", sendStream) // no shadowing!
+		if didTO, ok := keepaliveio.DidTimeOut(sendStream); ok && didTO {
+			err = fmt.Errorf("recv call idle timeout excceeded")
+		}
+		if err != nil {
+			return err
+		}
+	}
+
+	// read response + possibly error using
+	{
+		_, cancel, body, _ := keepaliveio.NewKeepaliveReadCloser(
+			ctx, // must be the original context, the actual recv context might have been cancelled by keepaliveio on timeout
+			c.config.RPCCallTimeout, // yes, this is the right choice, we expect only a few bytes of errors from now on
 			func(ctx context.Context) (io.ReadCloser, error) {
-				return sendStream, nil
-			},
-		)
-		go func() {
-			<-ctx.Done()
-			getLogger(ctx).Debug("keepalive reader context done, assuming connection idle timeout, closing send stream")
-			originalSendStream.Close()
-			getLogger(ctx).Debug("send stream closed")
-		}()
-	}
-
-	getLogger(ctx).WithField("send_stream_type", fmt.Sprintf("%T", sendStream)).Debug("send stream wrapped")
-
-	url := fmt.Sprintf("http://daemon%s%s", DoReceivePathPrefix, res.GetReceiveToken())
-	receiveRes, err := c.recvClient.Post(url, "application/octet-stream", sendStream)
-	if didTO, ok := keepaliveio.DidTimeOut(sendStream); ok && didTO {
-		err = fmt.Errorf("recv call idle timeout excceeded")
-	}
-	if err != nil {
-		return err
-	}
-
-	_, body, _  := keepaliveio.NewKeepaliveReadCloser(
-		ctx,
-		c.config.RPCCallTimeout, // yes, this is the right choice, we expect only a few bytes of errors from now on
-		func(ctx context.Context) (io.ReadCloser, error) {
-			return receiveRes.Body, nil
-	})
-
-	if receiveRes.StatusCode != 200 { // TODO 200 too restrictive?
-		var errorMsg strings.Builder
-		io.Copy(&errorMsg, io.LimitReader(body, 1 << 15)) // TODO error handling?
-		return fmt.Errorf("remote receive error: %s", strings.TrimSpace(errorMsg.String()))
+				return receiveRes.Body, nil
+			})
+		defer cancel()
+		if receiveRes.StatusCode != 200 { // TODO 200 too restrictive?
+			var errorMsg strings.Builder
+			io.Copy(&errorMsg, io.LimitReader(body, 1<<15)) // TODO error handling?
+			return fmt.Errorf("remote receive error: %s", strings.TrimSpace(errorMsg.String()))
+		}
 	}
 	return nil
 }

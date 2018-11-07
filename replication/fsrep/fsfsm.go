@@ -410,6 +410,7 @@ func (s *ReplicationStep) doReplication(ctx context.Context, ka *watchdog.KeepAl
 		err := errors.New("send request did not return a stream, broken endpoint implementation")
 		return err
 	}
+	defer sstream.Close()
 
 	s.byteCounter = util.NewByteCounterReader(sstream)
 	s.byteCounter.SetCallback(1*time.Second, func(i int64) {
@@ -431,7 +432,6 @@ func (s *ReplicationStep) doReplication(ctx context.Context, ka *watchdog.KeepAl
 			WithError(err).
 			WithField("errType", fmt.Sprintf("%T", err)).
 			Error("receive request failed (might also be error on sender)")
-		sstream.Close()
 		// This failure could be due to
 		// 	- an unexpected exit of ZFS on the sending side
 		//  - an unexpected exit of ZFS on the receiving side
