@@ -774,7 +774,9 @@ func (c *HttpClient) Receive(ctx context.Context, r *pdu.ReceiveTokenReq, sendSt
 
 		url := fmt.Sprintf("http://daemon%s%s", DoReceivePathPrefix, res.GetReceiveToken())
 		receiveRes, err = c.recvClient.Post(url, "application/octet-stream", sendStream) // no shadowing!
-		defer receiveRes.Body.Close()
+		if err == nil {
+			defer receiveRes.Body.Close()
+		}
 		if didTO, ok := keepaliveio.DidTimeOut(sendStream); ok && didTO {
 			err = fmt.Errorf("recv call idle timeout excceeded")
 		}
