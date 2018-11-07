@@ -80,6 +80,8 @@ jobs:
 
 `)
 	// default client
+	assert.Equal(t, 10, conf.Jobs[0].Ret.(*PullJob).RPC.MaxIdleConns)
+	assert.Equal(t, 10*time.Second, conf.Jobs[0].Ret.(*PullJob).RPC.IdleConnTimeout)
 	assert.Equal(t, 60*time.Second, conf.Jobs[0].Ret.(*PullJob).RPC.RPCCallTimeout)
 	assert.Equal(t, 10*time.Second, conf.Jobs[0].Ret.(*PullJob).RPC.SendCallIdleTimeout)
 	assert.Equal(t, 10*time.Second, conf.Jobs[0].Ret.(*PullJob).RPC.RecvCallIdleTimeout)

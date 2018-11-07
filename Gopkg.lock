@@ -270,11 +270,11 @@
 
 [[projects]]
   branch = "v2"
-  digest = "1:9d92186f609a73744232323416ddafd56fae67cb552162cc190ab903e36900dd"
+  digest = "1:b42eb981b0f2d8485c5258c787cf51fb3cbdafc1bc4d1b24d04b97b00252ee36"
   name = "github.com/zrepl/yaml-config"
   packages = ["."]
   pruneopts = ""
-  revision = "af27d27978ad95808723a62d87557d63c3ff0605"
+  revision = "8057d2d4a00597fb985775be4436f031cbae5d3e"
 
 [[projects]]
   branch = "master"
