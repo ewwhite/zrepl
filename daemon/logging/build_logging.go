@@ -15,6 +15,7 @@ import (
 	"github.com/zrepl/zrepl/logger"
 	"github.com/zrepl/zrepl/replication"
 	"github.com/zrepl/zrepl/tlsconf"
+	"github.com/problame/go-rwccmd"
 	"os"
 )
 
@@ -72,6 +73,7 @@ func WithSubsystemLoggers(ctx context.Context, log logger.Logger) context.Contex
 	ctx = snapper.WithLogger(ctx, log.WithField(SubsysField, "snapshot"))
 	ctx = serve.WithLogger(ctx, log.WithField(SubsysField, "serve"))
 	ctx = transporthttpinjector.WithLogger(ctx, log.WithField(SubsysField, "transporthttpinjector"))
+	ctx = rwccmd.ContextWithLog(ctx, log.WithField(SubsysField, "rwccmd"))
 	return ctx
 }
 

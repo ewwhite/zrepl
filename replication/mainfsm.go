@@ -232,7 +232,7 @@ func statePlanning(ctx context.Context, ka *watchdog.KeepAlive, sender Sender, r
 
 	slfssres, err := sender.ListFilesystems(ctx, &pdu.ListFilesystemReq{})
 	if err != nil {
-		log.WithError(err).Error("error listing sender filesystems")
+		log.WithError(err).WithField("errType", fmt.Sprintf("%T", err)).Error("error listing sender filesystems")
 		return handlePlanningError(err)
 	}
 	sfss := slfssres.GetFilesystems()
@@ -240,7 +240,7 @@ func statePlanning(ctx context.Context, ka *watchdog.KeepAlive, sender Sender, r
 
 	rlfssres, err := receiver.ListFilesystems(ctx, &pdu.ListFilesystemReq{})
 	if err != nil {
-		log.WithError(err).Error("error listing receiver filesystems")
+		log.WithError(err).WithField("errType", fmt.Sprintf("%T", err)).Error("error listing receiver filesystems")
 		return handlePlanningError(err)
 	}
 	rfss := rlfssres.GetFilesystems()

@@ -55,9 +55,8 @@ func (s *Sender) filterCheckFS(fs string) (*zfs.DatasetPath, error) {
 	return dp, nil
 }
 
-
 func (s *Sender) ListFilesystems(ctx context.Context, r *pdu.ListFilesystemReq) (*pdu.ListFilesystemRes, error) {
-	fss, err := zfs.ZFSListMapping(s.FSFilter)
+	fss, err := zfs.ZFSListMapping(ctx, s.FSFilter)
 	if err != nil {
 		return nil, err
 	}
@@ -68,7 +67,7 @@ func (s *Sender) ListFilesystems(ctx context.Context, r *pdu.ListFilesystemReq) 
 			// FIXME: not supporting ResumeToken yet
 		}
 	}
-	res := &pdu.ListFilesystemRes{Filesystems: rfss}
+	res := &pdu.ListFilesystemRes{Filesystems: rfss, Empty: len(rfss) == 0}
 	return res, nil
 }
 
@@ -101,7 +100,7 @@ func (s *Sender) GetSendToken(ctx context.Context, r *pdu.SendTokenReq) (*pdu.Se
 		if err != nil {
 			return nil, err
 		}
-		var expSize int64 = 0 // protocol says 0 means no estimate
+		var expSize int64 = 0      // protocol says 0 means no estimate
 		if si.SizeEstimate != -1 { // but si returns -1 for no size estimate
 			expSize = si.SizeEstimate
 		}
@@ -188,12 +187,12 @@ type FSMap interface { // FIXME unused
 // Receiver implements replication.ReplicationEndpoint for a receiving side
 type Receiver struct {
 	rootWithoutClientComponent *zfs.DatasetPath
-	tokenStore TokenStore
+	tokenStore                 TokenStore
 }
 
 var _ ReplicationServer = &Receiver{}
 
-func NewReceiver(rootDataset *zfs.DatasetPath, tokenStore TokenStore) (*Receiver) {
+func NewReceiver(rootDataset *zfs.DatasetPath, tokenStore TokenStore) *Receiver {
 	if rootDataset.Length() <= 0 {
 		panic(fmt.Sprintf("root dataset must not be an empty path: %v", rootDataset))
 	}
@@ -212,13 +211,13 @@ func clientRoot(rootFS *zfs.DatasetPath, clientIdentity string) (*zfs.DatasetPat
 	if err != nil {
 		return nil, err
 	}
-	if rootFSLen + 1 != clientRoot.Length() {
+	if rootFSLen+1 != clientRoot.Length() {
 		return nil, fmt.Errorf("client identity must be a single ZFS filesystem path component")
 	}
 	return clientRoot, nil
 }
 
-func (s *Receiver) clientRootFromCtx(ctx context.Context) (*zfs.DatasetPath) {
+func (s *Receiver) clientRootFromCtx(ctx context.Context) *zfs.DatasetPath {
 	clientIdentity := transporthttpinjector.ClientIdentity(ctx)
 	if clientIdentity == "" {
 		panic(fmt.Sprintf("transporthttpinjector.ClientIdentity must be set"))
@@ -255,10 +254,9 @@ func (f subroot) MapToLocal(fs string) (*zfs.DatasetPath, error) {
 	return c, nil
 }
 
-
 func (s *Receiver) ListFilesystems(ctx context.Context, req *pdu.ListFilesystemReq) (*pdu.ListFilesystemRes, error) {
 	root := s.clientRootFromCtx(ctx)
-	filtered, err := zfs.ZFSListMapping(subroot{root})
+	filtered, err := zfs.ZFSListMapping(ctx, subroot{root})
 	if err != nil {
 		return nil, err
 	}
@@ -271,13 +269,23 @@ func (s *Receiver) ListFilesystems(ctx context.Context, req *pdu.ListFilesystemR
 				WithError(err).
 				WithField("fs", a).
 				Error("inconsistent placeholder property")
-			return nil, errors.New("server error, see logs") // don't leak path
+			return nil, errors.New("server error: inconsistent placeholder property") // don't leak path
 		}
 		if ph {
+			getLogger(ctx).
+				WithField("fs", a.ToString()).
+				Debug("ignoring placeholder filesystem")
 			continue
 		}
+		getLogger(ctx).
+			WithField("fs", a.ToString()).
+			Debug("non-placeholder filesystem")
 		a.TrimPrefix(root)
 		fss = append(fss, &pdu.Filesystem{Path: a.ToString()})
+	}
+	if len(fss) == 0 {
+		getLogger(ctx).Debug("no non-placeholder filesystems")
+		return &pdu.ListFilesystemRes{Empty: true}, nil
 	}
 	return &pdu.ListFilesystemRes{Filesystems: fss}, nil
 }
@@ -315,7 +323,7 @@ func (s *Receiver) DoSend(ctx context.Context, token string) (io.ReadCloser, err
 
 type receiveToken struct {
 	clientRoot *zfs.DatasetPath
-	req *pdu.ReceiveTokenReq
+	req        *pdu.ReceiveTokenReq
 }
 
 func (s *Receiver) GetReceiveToken(ctx context.Context, req *pdu.ReceiveTokenReq) (*pdu.ReceiveTokenRes, error) {
@@ -458,8 +466,8 @@ type HttpHandler struct {
 }
 
 type HttpHandlerConfig struct {
-	ZFSReceiveIdleTimeout 	time.Duration
-	ZFSSendIdleTimeout 		time.Duration
+	ZFSReceiveIdleTimeout time.Duration
+	ZFSSendIdleTimeout    time.Duration
 }
 
 func (c HttpHandlerConfig) Validate() error {
@@ -480,7 +488,7 @@ func (c *HttpHandlerConfig) FromConfig(global *config.Global, serverConfig *conf
 
 var _ http.Handler
 
-const DoSendPathPrefix = "/zrepl/DoSend/" // trailing slash is important for http.ServeMux patterns
+const DoSendPathPrefix = "/zrepl/DoSend/"       // trailing slash is important for http.ServeMux patterns
 const DoReceivePathPrefix = "/zrepl/DoReceive/" // trailing slash is important for http.ServeMux patterns
 
 func init() {
@@ -498,8 +506,8 @@ func ToHandler(srv ReplicationServer, config HttpHandlerConfig) *HttpHandler {
 		panic(fmt.Errorf("handler config invalid: %s", err))
 	}
 	h := &HttpHandler{
-		mux: http.NewServeMux(),
-		srv: srv,
+		mux:    http.NewServeMux(),
+		srv:    srv,
 		config: &config,
 	}
 	twirpHandler := pdu.NewReplicationServerServer(h.srv, nil)
@@ -532,7 +540,7 @@ func (s *HttpHandler) handleSendRecv(mode int, w http.ResponseWriter, r *http.Re
 
 		var (
 			stream io.ReadCloser
-			err error
+			err    error
 		)
 		if s.config.ZFSSendIdleTimeout != 0 {
 			var cancel context.CancelFunc
@@ -563,7 +571,7 @@ func (s *HttpHandler) handleSendRecv(mode int, w http.ResponseWriter, r *http.Re
 	case 1:
 
 		var (
-			ctx context.Context
+			ctx    context.Context
 			stream io.ReadCloser
 		)
 		if s.config.ZFSReceiveIdleTimeout != 0 {
@@ -573,7 +581,7 @@ func (s *HttpHandler) handleSendRecv(mode int, w http.ResponseWriter, r *http.Re
 				s.config.ZFSReceiveIdleTimeout,
 				func(ctx context.Context) (io.ReadCloser, error) {
 					return r.Body, nil
-			})
+				})
 			defer cancel()
 		} else {
 			ctx = r.Context()
@@ -599,7 +607,6 @@ func (s *HttpHandler) handleSendRecv(mode int, w http.ResponseWriter, r *http.Re
 	}
 }
 
-
 func (s *HttpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	client_identity := transporthttpinjector.ClientIdentity(r.Context())
 	if client_identity == "" {
@@ -614,13 +621,13 @@ type HttpClient struct {
 	config          *HttpClientConfig
 	twirpHttpClient http.Client
 	sendClient      http.Client
-	recvClient 		http.Client
+	recvClient      http.Client
 
 	pdu.ReplicationServer // this the twirp client instance, see constructor
 }
 
 type HttpClientConfig struct {
-	MaxIdleConns		int
+	MaxIdleConns        int
 	IdleConnTimeout     time.Duration
 	RPCCallTimeout      time.Duration
 	SendCallIdleTimeout time.Duration
@@ -659,7 +666,6 @@ var _ replication.Endpoint = &HttpClient{}
 var _ replication.Sender = &HttpClient{}
 var _ replication.Receiver = &HttpClient{}
 
-
 type DialContextFunc = func(ctx context.Context, network string, addr string) (net.Conn, error)
 
 // config must be validated, NewClient will panic if it is not valid
@@ -670,26 +676,26 @@ func NewClient(dialFunc DialContextFunc, config HttpClientConfig) *HttpClient {
 	twirpHttpClient := http.Client{
 		Timeout: config.RPCCallTimeout, // full request timeout
 		Transport: &http.Transport{
-			DialContext: dialFunc,
+			DialContext:     dialFunc,
 			IdleConnTimeout: config.IdleConnTimeout,
-			MaxIdleConns: config.MaxIdleConns,
+			MaxIdleConns:    config.MaxIdleConns,
 		},
 	}
 	sendClient := http.Client{
 		Timeout: 0, // can't do full request timeouts, we use package keepaliveio
 		Transport: &http.Transport{
-			DialContext: dialFunc,
-			IdleConnTimeout: config.IdleConnTimeout,
-			MaxIdleConns: config.MaxIdleConns,
+			DialContext:           dialFunc,
+			IdleConnTimeout:       config.IdleConnTimeout,
+			MaxIdleConns:          config.MaxIdleConns,
 			ResponseHeaderTimeout: config.RPCCallTimeout,
 		},
 	}
 	recvClient := http.Client{
 		Timeout: 0, // can't do full request timeouts, we use package keepaliveio
 		Transport: &http.Transport{
-			DialContext: dialFunc,
+			DialContext:     dialFunc,
 			IdleConnTimeout: config.IdleConnTimeout,
-			MaxIdleConns: config.MaxIdleConns,
+			MaxIdleConns:    config.MaxIdleConns,
 			// do _not_ use any header timeout here since the Post takes arbitrarily long (rely on keepaliveio on local zfs send instead)
 		},
 	}
@@ -698,7 +704,7 @@ func NewClient(dialFunc DialContextFunc, config HttpClientConfig) *HttpClient {
 		config:          &config,
 		twirpHttpClient: twirpHttpClient,
 		sendClient:      sendClient,
-		recvClient: 	 recvClient,
+		recvClient:      recvClient,
 	}
 	c.ReplicationServer = pdu.NewReplicationServerProtobufClient("http://daemon", &c.twirpHttpClient) // '/' could be anything
 	return c
@@ -731,7 +737,7 @@ func (c *HttpClient) Send(ctx context.Context, r *pdu.SendTokenReq) (*pdu.SendTo
 
 	if sendRes.StatusCode != 200 { // TODO 200 too restrictive?
 		var errorMsg strings.Builder
-		io.Copy(&errorMsg, io.LimitReader(stream, 1 << 15)) // TODO error handling?
+		io.Copy(&errorMsg, io.LimitReader(stream, 1<<15)) // TODO error handling?
 		return nil, nil, fmt.Errorf("remote send error: %s", strings.TrimSpace(errorMsg.String()))
 	}
 

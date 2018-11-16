@@ -14,6 +14,7 @@ message ListFilesystemReq {}
 
 message ListFilesystemRes {
     repeated Filesystem Filesystems = 1;
+    bool Empty = 2;
 }
 
 message Filesystem {
