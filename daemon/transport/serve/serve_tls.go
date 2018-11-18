@@ -71,6 +71,10 @@ func (l tlsAuthListener) Accept(ctx context.Context) (*AuthConn, error) {
 		return nil, err
 	}
 	if _, ok := l.clientCNs[cn]; !ok {
+		if dl, ok := ctx.Deadline(); ok {
+			defer c.SetDeadline(time.Time{})
+			c.SetDeadline(dl)
+		}
 		if err := c.Close(); err != nil {
 			getLogger(ctx).WithError(err).Error("error closing connection with unauthorized common name")
 		}
