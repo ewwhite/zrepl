@@ -135,7 +135,7 @@ type modePull struct {
 }
 
 func (m *modePull) Setup(tokenStore endpoint.TokenStore, dialFunc endpoint.DialContextFunc, clientConfig endpoint.HttpClientConfig) {
-	m.receiver = endpoint.NewLocal(endpoint.NewReceiver(m.rootFS, tokenStore))
+	m.receiver = endpoint.NewLocal(endpoint.NewReceiver(m.rootFS, false, tokenStore))
 	m.sender = endpoint.NewClient(dialFunc, clientConfig)
 }
 

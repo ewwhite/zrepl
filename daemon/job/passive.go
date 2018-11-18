@@ -43,7 +43,7 @@ type modeSink struct {
 func (m *modeSink) Type() Type { return TypeSink }
 
 func (m *modeSink) Handler(handlerConfig endpoint.HttpHandlerConfig, tokenStore endpoint.TokenStore) http.Handler {
-	local :=  endpoint.NewReceiver(m.rootDataset, tokenStore)
+	local :=  endpoint.NewReceiver(m.rootDataset, true, tokenStore)
 	return endpoint.ToHandler(local, handlerConfig)
 }
 

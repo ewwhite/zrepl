@@ -188,15 +188,16 @@ type FSMap interface { // FIXME unused
 type Receiver struct {
 	rootWithoutClientComponent *zfs.DatasetPath
 	tokenStore                 TokenStore
+	appendClientIdentity       bool
 }
 
 var _ ReplicationServer = &Receiver{}
 
-func NewReceiver(rootDataset *zfs.DatasetPath, tokenStore TokenStore) *Receiver {
+func NewReceiver(rootDataset *zfs.DatasetPath, appendClientIdentity bool, tokenStore TokenStore) *Receiver {
 	if rootDataset.Length() <= 0 {
 		panic(fmt.Sprintf("root dataset must not be an empty path: %v", rootDataset))
 	}
-	return &Receiver{rootWithoutClientComponent: rootDataset.Copy(), tokenStore: tokenStore}
+	return &Receiver{rootWithoutClientComponent: rootDataset.Copy(), tokenStore: tokenStore, appendClientIdentity: appendClientIdentity}
 }
 
 func TestClientIdentity(rootFS *zfs.DatasetPath, clientIdentity string) error {
@@ -218,6 +219,10 @@ func clientRoot(rootFS *zfs.DatasetPath, clientIdentity string) (*zfs.DatasetPat
 }
 
 func (s *Receiver) clientRootFromCtx(ctx context.Context) *zfs.DatasetPath {
+	if !s.appendClientIdentity  {
+		return s.rootWithoutClientComponent.Copy()
+	}
+
 	clientIdentity := transporthttpinjector.ClientIdentity(ctx)
 	if clientIdentity == "" {
 		panic(fmt.Sprintf("transporthttpinjector.ClientIdentity must be set"))
