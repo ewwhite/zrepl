@@ -10,6 +10,7 @@ import (
 	"github.com/zrepl/zrepl/daemon/pruner"
 	"github.com/zrepl/zrepl/daemon/snapper"
 	"github.com/zrepl/zrepl/daemon/transport/serve"
+	"github.com/zrepl/zrepl/daemon/transport/transporthttpinjector"
 	"github.com/zrepl/zrepl/endpoint"
 	"github.com/zrepl/zrepl/logger"
 	"github.com/zrepl/zrepl/replication"
@@ -70,6 +71,7 @@ func WithSubsystemLoggers(ctx context.Context, log logger.Logger) context.Contex
 	ctx = pruner.WithLogger(ctx, log.WithField(SubsysField, "pruning"))
 	ctx = snapper.WithLogger(ctx, log.WithField(SubsysField, "snapshot"))
 	ctx = serve.WithLogger(ctx, log.WithField(SubsysField, "serve"))
+	ctx = transporthttpinjector.WithLogger(ctx, log.WithField(SubsysField, "transporthttpinjector"))
 	return ctx
 }
 

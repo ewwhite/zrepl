@@ -161,9 +161,10 @@ func (j *PassiveSide) Run(ctx context.Context) {
 	})
 
 	server := transporthttpinjector.NewServer(listener, requestLogger)
-	if err := server.Serve(ctx); err != nil {
+	serveCtx := logging.WithSubsystemLoggers(ctx, log)
+	if err := server.Serve(serveCtx); err != nil {
 		if err != context.Canceled {
-			log.WithError(err).Error("error serving")
+			log.WithError(err).WithField("errType", fmt.Sprintf("%T", err)).Error("error serving")
 		}
 	}
 }
