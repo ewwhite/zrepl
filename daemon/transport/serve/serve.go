@@ -9,6 +9,7 @@ import (
 	"context"
 	"github.com/zrepl/zrepl/logger"
 	"github.com/zrepl/zrepl/zfs"
+	"github.com/zrepl/zrepl/util/envconst"
 	"time"
 )
 
@@ -103,7 +104,8 @@ func (l HandshakeListener) Accept(ctx context.Context) (*AuthConn, error) {
 	}
 	dl, ok := ctx.Deadline()
 	if !ok {
-		dl = time.Now().Add(10*time.Second) // FIXME constant
+		dl = time.Now(). // shadowing!
+			Add(envconst.Duration("ZREPL_TRANSPORT_BANNER_HANDSHAKE_TIMEOUT", 10*time.Second))
 	}
 	if err := transport.DoHandshakeCurrentVersion(conn, dl); err != nil {
 		conn.Close()
