@@ -11,11 +11,14 @@ import (
 	"github.com/zrepl/zrepl/daemon/snapper"
 	"github.com/zrepl/zrepl/daemon/transport/serve"
 	"github.com/zrepl/zrepl/daemon/transport/transporthttpinjector"
+	"github.com/zrepl/zrepl/daemon/transport/transportmux"
 	"github.com/zrepl/zrepl/endpoint"
 	"github.com/zrepl/zrepl/endpoint/tokenstore"
+	"github.com/zrepl/zrepl/util/envconst"
 	"github.com/zrepl/zrepl/zfs"
 	"net/http"
 	"sync/atomic"
+	"time"
 )
 
 type PassiveSide struct {
@@ -160,8 +163,13 @@ func (j *PassiveSide) Run(ctx context.Context) {
 		log.WithField("uri", request.RequestURI).Debug("finished request")
 	})
 
-	server := transporthttpinjector.NewServer(listener, requestLogger)
 	serveCtx := logging.WithSubsystemLoggers(ctx, log)
+	listeners, err  := transportmux.Demux(serveCtx, listener, []string{"zrepl_control", "zrepl_data"}, envconst.Duration("ZREPL_TRANSPORT_DEMUX_TIMEOUT", 10*time.Second))
+	if err != nil {
+		panic(err)
+	}
+	controlListener := listeners["zrepl_control"]
+	server := transporthttpinjector.NewServer(controlListener, requestLogger)
 	if err := server.Serve(serveCtx); err != nil {
 		if err != context.Canceled {
 			log.WithError(err).WithField("errType", fmt.Sprintf("%T", err)).Error("error serving")

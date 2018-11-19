@@ -13,6 +13,7 @@ import (
 	"github.com/zrepl/zrepl/daemon/snapper"
 	"github.com/zrepl/zrepl/daemon/transport/connecter"
 	"github.com/zrepl/zrepl/daemon/transport/transporthttpinjector"
+	"github.com/zrepl/zrepl/daemon/transport/transportmux"
 	"github.com/zrepl/zrepl/endpoint"
 	"github.com/zrepl/zrepl/endpoint/tokenstore"
 	"github.com/zrepl/zrepl/replication"
@@ -202,10 +203,16 @@ func activeSide(g *config.Global, in *config.ActiveJob, mode activeMode) (j *Act
 		ConstLabels: prometheus.Labels{"zrepl_job":j.name},
 	}, []string{"filesystem"})
 
-	j.connecter, err = connecter.FromConfig(g, in.Connect)
+	rawConnecter, err := connecter.FromConfig(g, in.Connect)
 	if err != nil {
 		return nil, errors.Wrap(err, "cannot build client")
 	}
+	muxedConnecters, err := transportmux.MuxConnecter(rawConnecter, []string{"zrepl_control", "zrepl_data"}, envconst.Duration("ZREPL_TRANSPORT_MUX_TIMEOUT", 10*time.Second))
+	if err != nil {
+		panic(err)
+	}
+	j.connecter = muxedConnecters["zrepl_control"]
+
 	j.tokenStore, j.tokenStoreStop, err = tokenstore.NewWithRandomKey()
 	if err != nil {
 		return nil, errors.Wrap(err, "cannot build token store")
