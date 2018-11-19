@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"github.com/pkg/errors"
 	"github.com/zrepl/zrepl/config"
+	"github.com/zrepl/zrepl/daemon/transport/connecter"
 	"github.com/zrepl/zrepl/daemon/transport/transporthttpinjector"
+	"github.com/zrepl/zrepl/endpoint/dataconn"
 	"github.com/zrepl/zrepl/replication"
 	"github.com/zrepl/zrepl/replication/pdu"
 	"github.com/zrepl/zrepl/util/envconst"
@@ -624,10 +626,7 @@ func (s *HttpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // for a remote instance of ReplicationServer
 type HttpClient struct {
 	config          *HttpClientConfig
-	twirpHttpClient http.Client
-	sendClient      http.Client
-	recvClient      http.Client
-
+	dataClient		*dataconn.Client
 	pdu.ReplicationServer // this the twirp client instance, see constructor
 }
 
@@ -674,49 +673,34 @@ var _ replication.Receiver = &HttpClient{}
 type DialContextFunc = func(ctx context.Context, network string, addr string) (net.Conn, error)
 
 // config must be validated, NewClient will panic if it is not valid
-func NewClient(dialFunc DialContextFunc, config HttpClientConfig) *HttpClient {
+func NewClient(connecter connecter.Connecter, config HttpClientConfig) *HttpClient {
 	if err := config.Validate(); err != nil {
 		panic(fmt.Errorf("client config invalid: %s", err))
 	}
+	c := &HttpClient{}
 	twirpHttpClient := http.Client{
 		Timeout: config.RPCCallTimeout, // full request timeout
 		Transport: &http.Transport{
-			DialContext:     dialFunc,
+			DialContext: func(ctx context.Context) (net.Conn,error) {
+				return connecter.Connect(ctx)
+			},
 			IdleConnTimeout: config.IdleConnTimeout,
 			MaxIdleConns:    config.MaxIdleConns,
 		},
 	}
-	sendClient := http.Client{
-		Timeout: 0, // can't do full request timeouts, we use package keepaliveio
-		Transport: &http.Transport{
-			DialContext:           dialFunc,
-			IdleConnTimeout:       config.IdleConnTimeout,
-			MaxIdleConns:          config.MaxIdleConns,
-			ResponseHeaderTimeout: config.RPCCallTimeout,
-		},
+	c.ReplicationServer = pdu.NewReplicationServerProtobufClient("http://daemon", &twirpHttpClient) // '/' could be anything
+	
+	dataClientConfig := dataconn.ClientConfig{
+		IdleConnTimeout: config.IdleConnTimeout,
+		MaxIdleConns: config.MaxIdleConns,
 	}
-	recvClient := http.Client{
-		Timeout: 0, // can't do full request timeouts, we use package keepaliveio
-		Transport: &http.Transport{
-			DialContext:     dialFunc,
-			IdleConnTimeout: config.IdleConnTimeout,
-			MaxIdleConns:    config.MaxIdleConns,
-			// do _not_ use any header timeout here since the Post takes arbitrarily long (rely on keepaliveio on local zfs send instead)
-		},
-	}
-
-	c := &HttpClient{
-		config:          &config,
-		twirpHttpClient: twirpHttpClient,
-		sendClient:      sendClient,
-		recvClient:      recvClient,
-	}
-	c.ReplicationServer = pdu.NewReplicationServerProtobufClient("http://daemon", &c.twirpHttpClient) // '/' could be anything
+	c.dataClient = dataconn.NewClient(connecter, dataClientConfig)
 	return c
 }
 
 // callers must ensure that the returned io.ReadCloser is closed
 func (c *HttpClient) Send(ctx context.Context, r *pdu.SendTokenReq) (*pdu.SendTokenRes, io.ReadCloser, error) {
+
 	res, err := c.ReplicationServer.GetSendToken(ctx, r)
 	if err != nil {
 		return nil, nil, err

@@ -68,3 +68,7 @@ ignored = [ "github.com/inconshreveable/mousetrap" ]
 [[constraint]]
   name = "github.com/gdamore/tcell"
   version = "1.0.0"
+
+[[constraint]]
+  name = "github.com/go-playground/validator"
+  version = "9.23.0"
