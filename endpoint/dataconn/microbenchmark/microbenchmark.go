@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 
+	"github.com/pkg/profile"
 	"github.com/zrepl/zrepl/endpoint/dataconn"
 	"github.com/zrepl/zrepl/logger"
 	"github.com/zrepl/zrepl/replication/pdu"
@@ -28,7 +29,8 @@ func (devNullHandler) HandleSend(ctx context.Context, r *pdu.SendTokenReq) (*pdu
 }
 
 func (devNullHandler) HandleReceive(ctx context.Context, r *pdu.ReceiveTokenReq, stream io.Reader) (*pdu.ReceiveTokenRes, error) {
-	_, err := io.Copy(os.Stdout, stream)
+	var buf [1<<15]byte
+	_, err := io.CopyBuffer(os.Stdout, stream, buf[:])
 	var res pdu.ReceiveTokenRes
 	return &res, err
 }
@@ -45,18 +47,21 @@ var args struct {
 	addr      string
 	appmode   string
 	direction string
+	profile   bool
 }
 
 func server() {
 
 	log := logger.NewStderrDebugLogger()
 	log.Debug("starting server")
-	l, err := net.Listen("tcp", "127.0.0.1:8888")
+	l, err := net.Listen("tcp", args.addr)
 	orDie(err)
 
 	srvConfig := dataconn.ServerConfig{
-		MaxProtoLen:  4096,
-		MaxHeaderLen: 4096,
+		MaxProtoLen:      4096,
+		MaxHeaderLen:     4096,
+		SendChunkSize:    1 << 17,
+		MaxRecvChunkSize: 1 << 17,
 	}
 	srv := dataconn.NewServer(l, devNullHandler{}, srvConfig)
 
@@ -68,10 +73,15 @@ func server() {
 
 func main() {
 
-	flag.StringVar(&args.addr, "address", "127.0.0.1:8888", "")
+	flag.BoolVar(&args.profile, "profile", false, "")
+	flag.StringVar(&args.addr, "address", ":8888", "")
 	flag.StringVar(&args.appmode, "appmode", "client|server", "")
 	flag.StringVar(&args.direction, "direction", "", "send|recv")
 	flag.Parse()
+
+	if args.profile {
+		defer profile.Start(profile.CPUProfile).Stop()
+	}
 
 	switch args.appmode {
 	case "client":
@@ -90,12 +100,14 @@ func client() {
 	ctx = dataconn.WithLogger(ctx, logger)
 
 	clientConfig := dataconn.ClientConfig{
-		MaxProtoLen:  4096,
-		MaxHeaderLen: 4096,
+		MaxProtoLen:      4096,
+		MaxHeaderLen:     4096,
+		SendChunkSize:    1 << 17,
+		MaxRecvChunkSize: 1 << 17,
 	}
 	orDie(clientConfig.Validate())
 
-	connecter := tcpConnecter{"tcp", "127.0.0.1:8888"}
+	connecter := tcpConnecter{"tcp", args.addr}
 	client := dataconn.NewClient(connecter, clientConfig)
 
 	switch args.direction {
@@ -103,7 +115,8 @@ func client() {
 		req := pdu.SendTokenReq{}
 		_, stream, err := client.ReqSendStream(ctx, &req)
 		orDie(err)
-		_, err = io.Copy(os.Stdout, stream)
+		var buf [1<<15]byte
+		_, err = io.CopyBuffer(os.Stdout, stream, buf[:])
 		orDie(err)
 	case "recv":
 		var buf bytes.Buffer

@@ -45,6 +45,8 @@ type Client struct {
 type ClientConfig struct {
 	MaxProtoLen     uint32        `validate:"gt=0"`
 	MaxHeaderLen    uint32        `validate:"gt=0"`
+	SendChunkSize   uint32		  `validate:"gt=0"`
+	MaxRecvChunkSize uint32		  `validate:"gt=0"`
 	IdleConnTimeout time.Duration `validate:"gte=0"`
 }
 
@@ -183,7 +185,7 @@ func (c *Client) ReqSendStream(ctx context.Context, req *pdu.SendTokenReq) (*pdu
 		return &res, nil, nil
 	}
 
-	reader := chunker.NewStreamReader(wire, 1<<20) // FIXME constant
+	reader := chunker.NewStreamReader(wire, c.config.MaxRecvChunkSize)
 	rc := &unchunkingReadCloser{wire: wire, unchunker: reader}
 	return &res, rc, nil // TODO: return something that enables caller to put wire back..?
 }
@@ -217,7 +219,7 @@ func (c *Client) ReqRecv(ctx context.Context, req *pdu.ReceiveTokenReq, sendStre
 	go func() {
 		defer wg.Done()
 		// only a write error possible, see API
-		writeErr := chunker.WriteStream(ctx, wire, sendStream, 1<<20) // FIXME constant
+		writeErr := chunker.WriteStream(ctx, wire, sendStream, c.config.SendChunkSize)
 		if err != nil {
 			getLog(ctx).WithError(writeErr).Error("network or receiver error while writing send stream")
 		} else {
@@ -268,6 +270,8 @@ type Server struct {
 type ServerConfig struct {
 	MaxProtoLen     uint32        `validate:"gt=0"`
 	MaxHeaderLen    uint32        `validate:"gt=0"`
+	SendChunkSize   uint32		  `validate:"gt=0"`
+	MaxRecvChunkSize uint32		  `validate:"gt=0"`
 	HeaderTimeout   time.Duration `validate:"gte=0"`
 	IdleConnTimeout time.Duration `validate:"gte=0"`
 }
@@ -301,7 +305,7 @@ outer:
 			case <-ctx.Done():
 				if err := s.l.Close(); err != nil {
 					getLog(ctx).WithError(err).Error("error closing listener after context error")
-				}
+			}
 			case <-accepted:
 			}
 		}()
@@ -376,7 +380,7 @@ outer:
 				continue outer
 			}
 			getLog(ctx).Debug("pre receive handler")
-			unchunker := chunker.NewStreamReader(wire, 1 << 20) // FIXME constant
+			unchunker := chunker.NewStreamReader(wire, s.config.MaxRecvChunkSize)
 			res, err = s.h.HandleReceive(ctx, &req, unchunker) // SHADOWING
 		default:
 			clientError(fmt.Sprintf("unknown endpoint %q", hdr.Endpoint))
@@ -420,7 +424,7 @@ outer:
 			// TODO move this logic (and the above) to a ResonseWriter similar to Go's http package
 				
 			getLog(ctx).Debug("begin writing stream")
-			writeErr := chunker.WriteStream(ctx, wire, sendStream, 1<<20) // FIXME constant
+			writeErr := chunker.WriteStream(ctx, wire, sendStream, s.config.SendChunkSize)
 			// API guarantees this is due to wire or receiver, not sender
 			if writeErr != nil {
 				getLog(ctx).WithError(writeErr).Error("network or receiver error while writing send stream")
