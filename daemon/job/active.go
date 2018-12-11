@@ -3,7 +3,6 @@ package job
 import (
 	"context"
 	"github.com/pkg/errors"
-	"github.com/problame/go-streamrpc"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/zrepl/zrepl/config"
 	"github.com/zrepl/zrepl/daemon/filters"
@@ -12,7 +11,9 @@ import (
 	"github.com/zrepl/zrepl/daemon/logging"
 	"github.com/zrepl/zrepl/daemon/pruner"
 	"github.com/zrepl/zrepl/daemon/snapper"
-	"github.com/zrepl/zrepl/daemon/transport/connecter"
+	"github.com/zrepl/zrepl/transport"
+	"github.com/zrepl/zrepl/transport/fromconfig"
+	"github.com/zrepl/zrepl/rpc"
 	"github.com/zrepl/zrepl/endpoint"
 	"github.com/zrepl/zrepl/replication"
 	"github.com/zrepl/zrepl/util/envconst"
@@ -24,7 +25,9 @@ import (
 type ActiveSide struct {
 	mode          activeMode
 	name          string
-	clientFactory *connecter.ClientFactory
+	connecter	  transport.Connecter
+
+	validatedClientConfig rpc.ClientConfig
 
 	prunerFactory *pruner.PrunerFactory
 
@@ -77,20 +80,26 @@ func (a *ActiveSide) updateTasks(u func(*activeSideTasks)) activeSideTasks {
 }
 
 type activeMode interface {
-	SenderReceiver(client *streamrpc.Client) (replication.Sender, replication.Receiver, error)
+	Setup(connecter transport.Connecter, clientConfig rpc.ClientConfig)
+	SenderReceiver() (replication.Sender, replication.Receiver)
 	Type() Type
 	RunPeriodic(ctx context.Context, wakeUpCommon chan<- struct{})
 }
 
 type modePush struct {
-	fsfilter         endpoint.FSFilter
-	snapper *snapper.PeriodicOrManual
+	sender   *endpoint.Sender
+	receiver *rpc.Client
+	fsfilter endpoint.FSFilter
+	snapper  *snapper.PeriodicOrManual
 }
 
-func (m *modePush) SenderReceiver(client *streamrpc.Client) (replication.Sender, replication.Receiver, error) {
-	sender := endpoint.NewSender(m.fsfilter)
-	receiver := endpoint.NewRemote(client)
-	return sender, receiver, nil
+func (m *modePush) Setup(connecter transport.Connecter, clientConfig rpc.ClientConfig) {
+	m.sender = endpoint.NewSender(m.fsfilter)
+	m.receiver = rpc.NewClient(connecter, clientConfig)
+}
+
+func (m *modePush) SenderReceiver() (replication.Sender, replication.Receiver) {
+	return m.sender, m.receiver
 }
 
 func (m *modePush) Type() Type { return TypePush }
@@ -116,14 +125,19 @@ func modePushFromConfig(g *config.Global, in *config.PushJob) (*modePush, error)
 }
 
 type modePull struct {
+	receiver *endpoint.Receiver
+	sender   *rpc.Client
 	rootFS   *zfs.DatasetPath
 	interval time.Duration
 }
 
-func (m *modePull) SenderReceiver(client *streamrpc.Client) (replication.Sender, replication.Receiver, error) {
-	sender := endpoint.NewRemote(client)
-	receiver, err := endpoint.NewReceiver(m.rootFS)
-	return sender, receiver, err
+func (m *modePull) Setup(connecter transport.Connecter, clientConfig rpc.ClientConfig) {
+	m.receiver = endpoint.NewReceiver(m.rootFS, false)
+	m.sender = rpc.NewClient(connecter, clientConfig)
+}
+
+func (m *modePull) SenderReceiver() (replication.Sender, replication.Receiver) {
+	return m.sender, m.receiver
 }
 
 func (*modePull) Type() Type { return TypePull }
@@ -185,10 +199,16 @@ func activeSide(g *config.Global, in *config.ActiveJob, mode activeMode) (j *Act
 		ConstLabels: prometheus.Labels{"zrepl_job":j.name},
 	}, []string{"filesystem"})
 
-	j.clientFactory, err = connecter.FromConfig(g, in.Connect)
+	j.connecter, err = fromconfig.ConnecterFromConfig(g, in.Connect)
 	if err != nil {
 		return nil, errors.Wrap(err, "cannot build client")
 	}
+
+	if err := j.validatedClientConfig.FromConfig(g, in.RPC); err != nil {
+		return nil, errors.Wrap(err, "invalid rpc client config")
+	}
+
+	j.mode.Setup(j.connecter, j.validatedClientConfig)
 
 	j.promPruneSecs = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace:   "zrepl",
@@ -353,13 +373,7 @@ func (j *ActiveSide) do(ctx context.Context) {
 		}
 	}()
 
-	client, err := j.clientFactory.NewClient()
-	if err != nil {
-		log.WithError(err).Error("factory cannot instantiate streamrpc client")
-	}
-	defer client.Close(ctx)
-
-	sender, receiver, err := j.mode.SenderReceiver(client)
+	sender, receiver := j.mode.SenderReceiver()
 
 	{
 		select {

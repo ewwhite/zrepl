@@ -6,16 +6,17 @@ import (
 	"crypto/x509"
 	"github.com/mattn/go-isatty"
 	"github.com/pkg/errors"
-	"github.com/problame/go-streamrpc"
+	"github.com/problame/go-rwccmd"
 	"github.com/zrepl/zrepl/config"
 	"github.com/zrepl/zrepl/daemon/pruner"
+	"github.com/zrepl/zrepl/daemon/snapper"
+	"github.com/zrepl/zrepl/transport"
+	"github.com/zrepl/zrepl/rpc/transportmux"
 	"github.com/zrepl/zrepl/endpoint"
 	"github.com/zrepl/zrepl/logger"
 	"github.com/zrepl/zrepl/replication"
 	"github.com/zrepl/zrepl/tlsconf"
 	"os"
-	"github.com/zrepl/zrepl/daemon/snapper"
-	"github.com/zrepl/zrepl/daemon/transport/serve"
 )
 
 func OutletsFromConfig(in config.LoggingOutletEnumList) (*logger.Outlets, error) {
@@ -60,20 +61,34 @@ func OutletsFromConfig(in config.LoggingOutletEnumList) (*logger.Outlets, error)
 
 }
 
+type Subsystem string
+
 const (
-	SubsysReplication = "repl"
-	SubsysStreamrpc   = "rpc"
-	SubsyEndpoint     = "endpoint"
+	SubsysReplication   Subsystem = "repl"
+	SubsyEndpoint       Subsystem = "endpoint"
+	SubsysPruning       Subsystem = "pruning"
+	SubsysSnapshot      Subsystem = "snapshot"
+	SubsysTransport     Subsystem = "transport"
+	SubsysTransportMux  Subsystem = "transportmux"
+	SubsysRwccmd        Subsystem = "rwccmd"
+	SubsysRPC           Subsystem = "rpc"
+	SubsysControlServer Subsystem = "rpc.ctrl"
+	SubsysDataServer    Subsystem = "rpc.data"
 )
 
 func WithSubsystemLoggers(ctx context.Context, log logger.Logger) context.Context {
-	ctx = replication.WithLogger(ctx, log.WithField(SubsysField, "repl"))
-	ctx = streamrpc.ContextWithLogger(ctx, streamrpcLogAdaptor{log.WithField(SubsysField, "rpc")})
-	ctx = endpoint.WithLogger(ctx, log.WithField(SubsysField, "endpoint"))
-	ctx = pruner.WithLogger(ctx, log.WithField(SubsysField, "pruning"))
-	ctx = snapper.WithLogger(ctx, log.WithField(SubsysField, "snapshot"))
-	ctx = serve.WithLogger(ctx, log.WithField(SubsysField, "serve"))
+	ctx = replication.WithLogger(ctx, log.WithField(SubsysField, SubsysReplication))
+	ctx = endpoint.WithLogger(ctx, log.WithField(SubsysField, SubsyEndpoint))
+	ctx = pruner.WithLogger(ctx, log.WithField(SubsysField, SubsysPruning))
+	ctx = snapper.WithLogger(ctx, log.WithField(SubsysField, SubsysSnapshot))
+	ctx = transport.WithLogger(ctx, log.WithField(SubsysField, SubsysTransport))
+	ctx = transportmux.WithLogger(ctx, log.WithField(SubsysField, SubsysTransportMux))
+	ctx = rwccmd.ContextWithLog(ctx, log.WithField(SubsysField, SubsysRwccmd))
 	return ctx
+}
+
+func LogSubsystem(log logger.Logger, subsys Subsystem) logger.Logger {
+	return log.ReplaceField(SubsysField, subsys)
 }
 
 func parseLogFormat(i interface{}) (f EntryFormatter, err error) {

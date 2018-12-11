@@ -27,7 +27,7 @@ vendordeps:
 	dep ensure -v -vendor-only
 
 generate: #not part of the build, must do that manually
-	protoc -I=replication/pdu --go_out=replication/pdu replication/pdu/pdu.proto
+	protoc -I=replication/pdu --go_out=plugins=grpc:replication/pdu replication/pdu/pdu.proto
 	go generate -x ./...
 
 build:

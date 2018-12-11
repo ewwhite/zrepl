@@ -51,9 +51,7 @@ type Sender interface {
 type Receiver interface {
 	// Receive sends r and sendStream (the latter containing a ZFS send stream)
 	// to the parent github.com/zrepl/zrepl/replication.Endpoint.
-	// Implementors must guarantee that Close was called on sendStream before
-	// the call to Receive returns.
-	Receive(ctx context.Context, r *pdu.ReceiveReq, sendStream io.ReadCloser) error
+	Receive(ctx context.Context, r *pdu.ReceiveReq, sendStream io.Reader) (*pdu.ReceiveRes, error)
 }
 
 type StepReport struct {
@@ -410,6 +408,7 @@ func (s *ReplicationStep) doReplication(ctx context.Context, ka *watchdog.KeepAl
 		err := errors.New("send request did not return a stream, broken endpoint implementation")
 		return err
 	}
+	defer sstream.Close()
 
 	s.byteCounter = util.NewByteCounterReader(sstream)
 	s.byteCounter.SetCallback(1*time.Second, func(i int64) {
@@ -425,13 +424,12 @@ func (s *ReplicationStep) doReplication(ctx context.Context, ka *watchdog.KeepAl
 		ClearResumeToken: !sres.UsedResumeToken,
 	}
 	log.Debug("initiate receive request")
-	err = receiver.Receive(ctx, rr, sstream)
+	_, err = receiver.Receive(ctx, rr, sstream)
 	if err != nil {
 		log.
 			WithError(err).
 			WithField("errType", fmt.Sprintf("%T", err)).
 			Error("receive request failed (might also be error on sender)")
-		sstream.Close()
 		// This failure could be due to
 		// 	- an unexpected exit of ZFS on the sending side
 		//  - an unexpected exit of ZFS on the receiving side

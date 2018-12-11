@@ -1,4 +1,6 @@
-ignored = [ "github.com/inconshreveable/mousetrap" ]
+ignored = [
+    "github.com/inconshreveable/mousetrap",
+]
 
 [[constraint]]
   branch = "master"
@@ -58,16 +60,11 @@ ignored = [ "github.com/inconshreveable/mousetrap" ]
 
 [[constraint]]
   name = "github.com/golang/protobuf"
-  version = "1.2.0"
+  version = "1"
 
 [[constraint]]
   name = "github.com/fatih/color"
   version = "1.7.0"
-
-[[constraint]]
-  name = "github.com/problame/go-streamrpc"
-  version = "0.5.0"
-
 
 
 [[constraint]]
@@ -81,3 +78,11 @@ ignored = [ "github.com/inconshreveable/mousetrap" ]
 [[constraint]]
   branch = "master"
   name = "github.com/alvaroloes/enumer"
+
+[[constraint]]
+  name = "github.com/go-playground/validator"
+  version = "9.23.0"
+
+[[constraint]]
+  name = "google.golang.org/grpc"
+  version = "1"

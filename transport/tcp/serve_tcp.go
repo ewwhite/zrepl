@@ -1,16 +1,12 @@
-package serve
+package tcp
 
 import (
 	"github.com/zrepl/zrepl/config"
 	"net"
 	"github.com/pkg/errors"
 	"context"
+	"github.com/zrepl/zrepl/transport"
 )
-
-type TCPListenerFactory struct {
-	address *net.TCPAddr
-	clientMap *ipMap
-}
 
 type ipMapEntry struct {
 	ip net.IP
@@ -28,7 +24,7 @@ func ipMapFromConfig(clients map[string]string) (*ipMap, error) {
 		if clientIP == nil {
 			return nil, errors.Errorf("cannot parse client IP %q", clientIPString)
 		}
-		if err := ValidateClientIdentity(clientIdent); err != nil {
+		if err := transport.ValidateClientIdentity(clientIdent); err != nil {
 			return nil, errors.Wrapf(err,"invalid client identity for IP %q", clientIPString)
 		}
 		entries = append(entries, ipMapEntry{clientIP, clientIdent})
@@ -45,7 +41,7 @@ func (m *ipMap) Get(ip net.IP) (string, error) {
 	return "", errors.Errorf("no identity mapping for client IP %s", ip)
 }
 
-func TCPListenerFactoryFromConfig(c *config.Global, in *config.TCPServe) (*TCPListenerFactory, error) {
+func TCPListenerFactoryFromConfig(c *config.Global, in *config.TCPServe) (transport.AuthenticatedListenerFactory, error) {
 	addr, err := net.ResolveTCPAddr("tcp", in.Listen)
 	if err != nil {
 		return nil, errors.Wrap(err, "cannot parse listen address")
@@ -54,19 +50,14 @@ func TCPListenerFactoryFromConfig(c *config.Global, in *config.TCPServe) (*TCPLi
 	if err != nil {
 		return nil, errors.Wrap(err, "cannot parse client IP map")
 	}
-	lf := &TCPListenerFactory{
-		address: addr,
-		clientMap: clientMap,
+	lf := func() (transport.AuthenticatedListener, error) {
+		l, err := net.ListenTCP("tcp", addr)
+		if err != nil {
+			return nil, err
+		}
+		return &TCPAuthListener{l, clientMap}, nil
 	}
 	return lf, nil
-}
-
-func (f *TCPListenerFactory) Listen() (AuthenticatedListener, error) {
-	l, err := net.ListenTCP("tcp", f.address)
-	if err != nil {
-		return nil, err
-	}
-	return &TCPAuthListener{l, f.clientMap}, nil
 }
 
 type TCPAuthListener struct {
@@ -74,7 +65,7 @@ type TCPAuthListener struct {
 	clientMap *ipMap
 }
 
-func (f *TCPAuthListener) Accept(ctx context.Context) (AuthenticatedConn, error) {
+func (f *TCPAuthListener) Accept(ctx context.Context) (*transport.AuthConn, error) {
 	nc, err := f.TCPListener.Accept()
 	if err != nil {
 		return nil, err
@@ -82,10 +73,10 @@ func (f *TCPAuthListener) Accept(ctx context.Context) (AuthenticatedConn, error)
 	clientIP := nc.RemoteAddr().(*net.TCPAddr).IP
 	clientIdent, err := f.clientMap.Get(clientIP)
 	if err != nil {
-		getLogger(ctx).WithField("ip", clientIP).Error("client IP not in client map")
+		transport.GetLogger(ctx).WithField("ip", clientIP).Error("client IP not in client map")
 		nc.Close()
 		return nil, err
 	}
-	return authConn{nc, clientIdent}, nil
+	return transport.NewAuthConn(nc, clientIdent), nil
 }
 

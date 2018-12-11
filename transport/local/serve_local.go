@@ -1,4 +1,4 @@
-package serve
+package local
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"github.com/zrepl/zrepl/util/socketpair"
 	"net"
 	"sync"
+	"github.com/zrepl/zrepl/transport"
 )
 
 var localListeners struct {
@@ -89,21 +90,14 @@ func (a localAddr) String() string { return a.S }
 
 func (l *LocalListener) Addr() (net.Addr) { return localAddr{"<listening>"} }
 
-type localConn struct {
-	net.Conn
-	clientIdentity string
-}
-
-func (l localConn) ClientIdentity() string { return l.clientIdentity }
-
-func (l *LocalListener) Accept(ctx context.Context) (AuthenticatedConn, error) {
+func (l *LocalListener) Accept(ctx context.Context) (*transport.AuthConn, error) {
 	respondToRequest := func(req connectRequest, res connectResult) (err error) {
-		getLogger(ctx).
+		transport.GetLogger(ctx).
 			WithField("res.conn", res.conn).WithField("res.err", res.err).
 			Debug("responding to client request")
 		defer func() {
 			errv := recover()
-			getLogger(ctx).WithField("recover_err", errv).
+			transport.GetLogger(ctx).WithField("recover_err", errv).
 				Debug("panic on send to client callback, likely a legitimate client-side timeout")
 		}()
 		select {
@@ -116,7 +110,7 @@ func (l *LocalListener) Accept(ctx context.Context) (AuthenticatedConn, error) {
 		return err
 	}
 
-	getLogger(ctx).Debug("waiting for local client connect requests")
+	transport.GetLogger(ctx).Debug("waiting for local client connect requests")
 	var req connectRequest
 	select {
 	case req = <-l.connects:
@@ -124,7 +118,7 @@ func (l *LocalListener) Accept(ctx context.Context) (AuthenticatedConn, error) {
 		return nil, ctx.Err()
 	}
 
-	getLogger(ctx).WithField("client_identity", req.clientIdentity).Debug("got connect request")
+	transport.GetLogger(ctx).WithField("client_identity", req.clientIdentity).Debug("got connect request")
 	if req.clientIdentity == "" {
 		res := connectResult{nil, fmt.Errorf("client identity must not be empty")}
 		if err := respondToRequest(req, res); err != nil {
@@ -133,31 +127,31 @@ func (l *LocalListener) Accept(ctx context.Context) (AuthenticatedConn, error) {
 		return nil, fmt.Errorf("client connected with empty client identity")
 	}
 
-	getLogger(ctx).Debug("creating socketpair")
+	transport.GetLogger(ctx).Debug("creating socketpair")
 	left, right, err := socketpair.SocketPair()
 	if err != nil {
 		res := connectResult{nil, fmt.Errorf("server error: %s", err)}
 		if respErr := respondToRequest(req, res); respErr != nil {
 			// returning the socketpair error properly is more important than the error sent to the client
-			getLogger(ctx).WithError(respErr).Error("error responding to client")
+			transport.GetLogger(ctx).WithError(respErr).Error("error responding to client")
 		}
 		return nil, err
 	}
 
-	getLogger(ctx).Debug("responding with left side of socketpair")
+	transport.GetLogger(ctx).Debug("responding with left side of socketpair")
 	res := connectResult{left, nil}
 	if err := respondToRequest(req, res); err != nil {
-		getLogger(ctx).WithError(err).Error("error responding to client")
+		transport.GetLogger(ctx).WithError(err).Error("error responding to client")
 		if err := left.Close(); err != nil {
-			getLogger(ctx).WithError(err).Error("cannot close left side of socketpair")
+			transport.GetLogger(ctx).WithError(err).Error("cannot close left side of socketpair")
 		}
 		if err := right.Close(); err != nil {
-			getLogger(ctx).WithError(err).Error("cannot close right side of socketpair")
+			transport.GetLogger(ctx).WithError(err).Error("cannot close right side of socketpair")
 		}
 		return nil, err
 	}
 
-	return localConn{right, req.clientIdentity}, nil
+	return transport.NewAuthConn(right, req.clientIdentity), nil
 }
 
 func (l *LocalListener) Close() error {
@@ -169,19 +163,13 @@ func (l *LocalListener) Close() error {
 	return nil
 }
 
-type LocalListenerFactory struct {
-	listenerName string
-}
-
-func LocalListenerFactoryFromConfig(g *config.Global, in *config.LocalServe) (f *LocalListenerFactory, err error) {
+func LocalListenerFactoryFromConfig(g *config.Global, in *config.LocalServe) (transport.AuthenticatedListenerFactory,error) {
 	if in.ListenerName == "" {
 		return nil, fmt.Errorf("ListenerName must not be empty")
 	}
-	return &LocalListenerFactory{listenerName: in.ListenerName}, nil
+	listenerName := in.ListenerName
+	lf := func() (transport.AuthenticatedListener,error) {
+		return GetLocalListener(listenerName), nil
+	}
+	return lf, nil
 }
-
-
-func (lf *LocalListenerFactory) Listen() (AuthenticatedListener, error) {
-	return GetLocalListener(lf.listenerName), nil
-}
-

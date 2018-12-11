@@ -47,6 +47,7 @@ type ActiveJob struct {
 	Type         string                `yaml:"type"`
 	Name         string                `yaml:"name"`
 	Connect     ConnectEnum     `yaml:"connect"`
+	RPC 		*RPCClientConfig        `yaml:"rpc,optional,fromdefaults"`
 	Pruning      PruningSenderReceiver `yaml:"pruning"`
 	Debug        JobDebugSettings      `yaml:"debug,optional"`
 }
@@ -55,6 +56,7 @@ type PassiveJob struct {
 	Type        string           `yaml:"type"`
 	Name        string           `yaml:"name"`
 	Serve       ServeEnum `yaml:"serve"`
+	RPC 		*RPCServerConfig `yaml:"rpc,optional,fromdefaults"`
 	Debug       JobDebugSettings `yaml:"debug,optional"`
 }
 
@@ -130,7 +132,6 @@ type Global struct {
 	Monitoring []MonitoringEnum       `yaml:"monitoring,optional"`
 	Control    *GlobalControl         `yaml:"control,optional,fromdefaults"`
 	Serve      *GlobalServe           `yaml:"serve,optional,fromdefaults"`
-	RPC        *RPCConfig             `yaml:"rpc,optional,fromdefaults"`
 }
 
 func Default(i interface{}) {
@@ -145,14 +146,24 @@ func Default(i interface{}) {
 	}
 }
 
-type RPCConfig struct {
-	Timeout             time.Duration `yaml:"timeout,optional,positive,default=10s"`
-	TxChunkSize         uint32        `yaml:"tx_chunk_size,optional,default=32768"`
-	RxStructuredMaxLen  uint32        `yaml:"rx_structured_max,optional,default=16777216"`
-	RxStreamChunkMaxLen uint32        `yaml:"rx_stream_chunk_max,optional,default=16777216"`
-	RxHeaderMaxLen      uint32        `yaml:"rx_header_max,optional,default=40960"`
-	SendHeartbeatInterval             time.Duration `yaml:"send_heartbeat_interval,optional,positive,default=5s"`
+type DataConnShared struct {
+	MaxProtoLen      uint32        `yaml:"max_proto_len,optional,positive,default=4194304"` // 4MiB
+	MaxHeaderLen     uint32        `yaml:"max_header_len,optional,positive,default=32768"` // 32KiB
+	SendChunkSize    uint32        `yaml:"send_chunk_size,positive,default=32768"` // 32KiB
+	MaxRecvChunkSize uint32        `yaml:"max_recv_chunk_size,positive,default=2097152"` // 2MiB (1 hugepage)
+	IdleConnTimeout  time.Duration `yaml:"idle_conn_timeout,optional,zeropositive,default=60s"`
+}
 
+type DataConnClientConfig struct {
+	Shared *DataConnShared `yaml:",optional,fromdefaults"`
+}
+
+type RPCClientConfig struct {
+	MaxIdleConns  		int 		  `yaml:"max_idle_conns,optional,zeropositive,default=10"`
+	RPCCallTimeout      time.Duration `yaml:"rpc_call_timeout,optional,zeropositive,default=1m"`
+	SendCallIdleTimeout time.Duration `yaml:"send_call_idle_timeout,optional,zeropositive,default=10s"`
+	RecvCallIdleTimeout time.Duration `yaml:"recv_call_idle_timeout,optional,zeropositive,default=10s"`
+	DataConn 			*DataConnClientConfig `yaml:"data_conn,optional,fromdefaults"`
 }
 
 type ConnectEnum struct {
@@ -160,8 +171,7 @@ type ConnectEnum struct {
 }
 
 type ConnectCommon struct {
-	Type string     `yaml:"type"`
-	RPC  *RPCConfig `yaml:"rpc,optional"`
+	Type string            `yaml:"type"`
 }
 
 type TCPConnect struct {
@@ -202,9 +212,19 @@ type ServeEnum struct {
 	Ret interface{}
 }
 
+type DataConnServerConfig struct {
+	HeaderTimeout 	time.Duration `yaml:"header_timeout,optional,zeropositive,default=10s"`
+	Shared *DataConnShared `yaml:",optional,fromdefaults"`
+}
+
+type RPCServerConfig struct {
+	ZFSSendIdleTimeout             time.Duration `yaml:"zfs_send_idle_timeout,optional,zeropositive,default=10s"`
+	ZFSReceiveIdleTimeout          time.Duration `yaml:"zfs_recv_idle_timeout,optional,zeropositive,default=10s"`
+	DataConn					   *DataConnServerConfig `yaml:"data_conn,optional,fromdefaults"`
+}
+
 type ServeCommon struct {
-	Type string     `yaml:"type"`
-	RPC  *RPCConfig `yaml:"rpc,optional"`
+	Type string            `yaml:"type"`
 }
 
 type TCPServe struct {

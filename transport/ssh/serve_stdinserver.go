@@ -1,9 +1,10 @@
-package serve
+package ssh
 
 import (
 	"github.com/problame/go-netssh"
 	"github.com/zrepl/zrepl/config"
 	"github.com/zrepl/zrepl/daemon/nethelpers"
+	"github.com/zrepl/zrepl/transport"
 	"io"
 	"net"
 	"path"
@@ -13,38 +14,26 @@ import (
 	"sync/atomic"
 )
 
-type StdinserverListenerFactory struct {
-	ClientIdentities []string
-	Sockdir string
-}
-
-func MultiStdinserverListenerFactoryFromConfig(g *config.Global, in *config.StdinserverServer) (f *multiStdinserverListenerFactory, err error) {
+func MultiStdinserverListenerFactoryFromConfig(g *config.Global, in *config.StdinserverServer) (transport.AuthenticatedListenerFactory,error) {
 
 	for _, ci := range in.ClientIdentities {
-		if err := ValidateClientIdentity(ci); err != nil {
+		if err := transport.ValidateClientIdentity(ci); err != nil {
 			return nil, errors.Wrapf(err, "invalid client identity %q", ci)
 		}
 	}
 
-	f = &multiStdinserverListenerFactory{
-		ClientIdentities: in.ClientIdentities,
-		Sockdir: g.Serve.StdinServer.SockDir,
+	clientIdentities := in.ClientIdentities
+	sockdir := g.Serve.StdinServer.SockDir
+
+	lf := func() (transport.AuthenticatedListener,error) {
+		return multiStdinserverListenerFromClientIdentities(sockdir, clientIdentities)
 	}
 
-	return
-}
-
-type multiStdinserverListenerFactory struct {
-	ClientIdentities []string
-	Sockdir string
-}
-
-func (f *multiStdinserverListenerFactory) Listen() (AuthenticatedListener, error) {
-	return multiStdinserverListenerFromClientIdentities(f.Sockdir, f.ClientIdentities)
+	return lf, nil
 }
 
 type multiStdinserverAcceptRes struct {
-	conn AuthenticatedConn
+	conn *transport.AuthConn
 	err error
 }
 
@@ -78,7 +67,7 @@ func multiStdinserverListenerFromClientIdentities(sockdir string, cis []string) 
 	return &MultiStdinserverListener{listeners: listeners}, nil
 }
 
-func (m *MultiStdinserverListener) Accept(ctx context.Context) (AuthenticatedConn, error){
+func (m *MultiStdinserverListener) Accept(ctx context.Context) (*transport.AuthConn, error){
 
 	if m.accepts == nil {
 		m.accepts = make(chan multiStdinserverAcceptRes, len(m.listeners))
@@ -122,12 +111,12 @@ func (l stdinserverListener) Addr() net.Addr {
 	return netsshAddr{}
 }
 
-func (l stdinserverListener) Accept(ctx context.Context) (AuthenticatedConn, error) {
+func (l stdinserverListener) Accept(ctx context.Context) (*transport.AuthConn, error) {
 	c, err := l.l.Accept()
 	if err != nil {
 		return nil, err
 	}
-	return netsshConnToNetConnAdatper{c, l.clientIdentity}, nil
+	return transport.NewAuthConn(netsshConnToNetConnAdatper{c}, l.clientIdentity), nil
 }
 
 func (l stdinserverListener) Close() (err error) {
@@ -141,10 +130,7 @@ func (netsshAddr) String() string  { return "???" }
 
 type netsshConnToNetConnAdatper struct {
 	io.ReadWriteCloser // works for both netssh.SSHConn and netssh.ServeConn
-	clientIdentity string
 }
-
-func (a netsshConnToNetConnAdatper) ClientIdentity() string { return a.clientIdentity }
 
 func (netsshConnToNetConnAdatper) LocalAddr() net.Addr { return netsshAddr{} }
 

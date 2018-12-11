@@ -1,10 +1,9 @@
-package connecter
+package local
 
 import (
 	"context"
 	"fmt"
 	"github.com/zrepl/zrepl/config"
-	"github.com/zrepl/zrepl/daemon/transport/serve"
 	"net"
 )
 
@@ -24,7 +23,7 @@ func LocalConnecterFromConfig(in *config.LocalConnect) (*LocalConnecter, error) 
 }
 
 func (c *LocalConnecter) Connect(dialCtx context.Context) (conn net.Conn, err error) {
-	l := serve.GetLocalListener(c.listenerName)
+	l := GetLocalListener(c.listenerName)
 	return l.Connect(dialCtx, c.clientIdentity)
 }
 

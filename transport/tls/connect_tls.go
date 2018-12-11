@@ -1,4 +1,4 @@
-package connecter
+package tls
 
 import (
 	"context"
