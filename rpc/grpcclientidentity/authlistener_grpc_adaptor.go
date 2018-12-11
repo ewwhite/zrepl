@@ -64,17 +64,17 @@ func NewTransportCredentials(log Logger) credentials.TransportCredentials {
 }
 
 func (c *transportCredentials) ClientHandshake(ctx context.Context, s string, rawConn net.Conn) (net.Conn, credentials.AuthInfo, error) {
-	c.logger.Printf("ClientHandshake %q => %s", s, rawConn)
+	c.logger.WithField("url", s).WithField("connType", fmt.Sprintf("%T", rawConn)).Debug("ClientHandshake")
 	// do nothing, client credential is only for WithInsecure warning to go away
 	// the authentication is done by the connecter
 	return rawConn, &connecterAuthType{}, nil
 }
 
 func (c *transportCredentials) ServerHandshake(rawConn net.Conn) (net.Conn, credentials.AuthInfo, error) {
-	c.logger.Printf("ServerHandshake %T %s", rawConn, rawConn)
+	c.logger.WithField("connType", fmt.Sprintf("%T", rawConn)).Debug("ServerHandshake")
 	authConn, ok := rawConn.(*transport.AuthConn)
 	if !ok {
-		panic(fmt.Sprintf("NewTransportCredentials must be used with a listener that returns transport.AuthConn, got %T", rawConn))
+		panic(fmt.Sprintf("NewTransportCredentials must be used with a listener that returns *transport.AuthConn, got %T", rawConn))
 	}
 	return rawConn, &authConnAuthType{authConn.ClientIdentity()}, nil
 }
@@ -94,13 +94,12 @@ func (*transportCredentials) OverrideServerName(string) error {
 
 func NewInterceptors(logger Logger, clientIdentityKey interface{}) (unary grpc.UnaryServerInterceptor, stream grpc.StreamServerInterceptor) {
 	unary = func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
-		logger.Printf("request: %s", info.FullMethod)
+		logger.WithField("fullMethod", info.FullMethod).Debug("request")
 		p, ok := peer.FromContext(ctx)
 		if !ok {
 			panic("peer.FromContext expected to return a peer in grpc.UnaryServerInterceptor")
 		}
-		logger.Printf("peer: %v", p)
-		logger.Printf("auth info: %T %s", p, p.AuthInfo, p.AuthInfo)
+		logger.WithField("peer", fmt.Sprintf("%v", p)).Debug("peer")
 		a, ok := p.AuthInfo.(*authConnAuthType)
 		if !ok {
 			panic(fmt.Sprintf("NewInterceptors must be used in combination with grpc.NewTransportCredentials, but got auth type %T", p.AuthInfo))
