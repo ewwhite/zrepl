@@ -232,7 +232,7 @@ func (c *Client) ReqRecv(ctx context.Context, req *pdu.ReceiveReq, sendStream io
 	go func() {
 		defer wg.Done()
 		// only a write error possible, see API
-		writeErr := chunker.WriteStream(ctx, wire, sendStream, c.config.Shared.SendChunkSize)
+		writeErr := chunker.WriteStream(ctx, chunker.NetConnExportBuffersWriter{wire}, sendStream, c.config.Shared.SendChunkSize)
 		if err != nil {
 			getLog(ctx).WithError(writeErr).Error("network or receiver error while writing send stream")
 		} else {
@@ -491,7 +491,7 @@ outer:
 			}
 
 			getLog(ctx).Debug("begin writing stream")
-			writeErr := chunker.WriteStream(ctx, wire, sendStream, s.config.Shared.SendChunkSize)
+			writeErr := chunker.WriteStream(ctx, chunker.NetConnExportBuffersWriter{wire}, sendStream, s.config.Shared.SendChunkSize)
 			// API guarantees this is due to wire or receiver, not sender
 			if writeErr != nil {
 				getLog(ctx).WithError(writeErr).Error("network or receiver error while writing send stream")

@@ -70,7 +70,20 @@ type BuffersWriter interface {
 	WriteBuffers(buffers *net.Buffers) (int64, error)
 }
 
-func (b *chunkBuffer) flush(w io.Writer) error {
+type ChunkBufferWriter interface {
+	WriteBuffers(bufs net.Buffers) (int64, error)
+}
+
+type NetConnExportBuffersWriter struct {
+	net.Conn
+}
+
+func (c NetConnExportBuffersWriter) WriteBuffers(bufs net.Buffers) (int64,error) {
+	return bufs.WriteTo(c.Conn) // implementation of WriteTo checks for Go's internal buffersWriter
+}
+
+
+func (b *chunkBuffer) flush(w ChunkBufferWriter) error {
 	if int(b.headerLastChunkLen) != b.chunkLastReadLen {
 		panic("chunk length specified in header is inconsistent with last readChunk")
 	}
@@ -80,12 +93,7 @@ func (b *chunkBuffer) flush(w io.Writer) error {
 		n   int64
 		err error
 	)
-	if bw, ok := w.(BuffersWriter); ok {
-		n, err = bw.WriteBuffers(&iov)
-	} else {
-		// use the iov.WriteTo anyways, maybe w is a net.buffersWriter after all
-		n, err = iov.WriteTo(w)
-	}
+	n, err = w.WriteBuffers(iov)
 	if err != nil {
 		return err
 	}
@@ -97,7 +105,7 @@ func (b *chunkBuffer) flush(w io.Writer) error {
 }
 
 // does not return an error if r returns an error
-func WriteStream(ctx context.Context, out io.Writer, r io.Reader, csiz uint32) error {
+func WriteStream(ctx context.Context, out ChunkBufferWriter, r io.Reader, csiz uint32) error {
 
 	cbuf := newChunkBuffer(csiz)
 

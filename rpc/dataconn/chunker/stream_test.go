@@ -13,6 +13,18 @@ import (
 	"context"
 )
 
+type mockBuffer struct {
+	bytes.Buffer
+}
+
+func newMockBuffer() *mockBuffer {
+	return &mockBuffer{}
+}
+
+func (b *mockBuffer) WriteBuffers(bufs net.Buffers) (int64, error) {
+	return bufs.WriteTo(&b.Buffer)
+}
+
 func TestStreamEncoding(t *testing.T) {
 
 	type testCase struct {
@@ -36,8 +48,8 @@ func TestStreamEncoding(t *testing.T) {
 
 		src := bytes.NewBuffer(test.in)
 
-		var buf bytes.Buffer
-		err := WriteStream(context.Background(), &buf, src, test.csiz)
+		buf := newMockBuffer()
+		err := WriteStream(context.Background(), buf, src, test.csiz)
 		if err != nil {
 			t.Errorf("WriteStream should not fail writing to bytes.Buffer")
 			continue
@@ -47,7 +59,7 @@ func TestStreamEncoding(t *testing.T) {
 		if rcsiz == 0 {
 			rcsiz = test.csiz
 		}
-		r := NewStreamReader(&buf, rcsiz)
+		r := NewStreamReader(buf, rcsiz)
 		var dest bytes.Buffer
 		n, err := io.Copy(&dest, r)
 		if err != nil && err != test.err {
@@ -121,14 +133,27 @@ func (w *failingWriter) Write(p []byte) (n int, err error) {
 	return n, err
 }
 
+type failingChunkBufferWriter struct {
+	failingWriter
+}
+
+func newFailingChunkBufferWriter(fw failingWriter) failingChunkBufferWriter {
+	return failingChunkBufferWriter{fw}
+}
+
+func (b failingChunkBufferWriter) WriteBuffers(bufs net.Buffers) (int64, error) {
+	return bufs.WriteTo(&b.failingWriter)
+}
+
+
 func TestStreamDecodingIOError(t *testing.T) {
 
 	dataStr := []byte("this is a test string")
 	var totalLen int
 	{
 		data := bytes.NewBuffer(dataStr)
-		var stream bytes.Buffer
-		WriteStream(context.Background(), &stream, data, 2)
+		stream := newMockBuffer()
+		WriteStream(context.Background(), stream, data, 2)
 		totalLen = stream.Len()
 	}
 
@@ -137,12 +162,12 @@ func TestStreamDecodingIOError(t *testing.T) {
 	for failAt := 0; failAt < totalLen; failAt++ {
 		t.Logf("failAt: %d / %d", failAt, totalLen)
 		data := bytes.NewBuffer(dataStr)
-		var stream bytes.Buffer
-		WriteStream(context.Background(), &stream, data, 2)
+		stream := newMockBuffer()
+		WriteStream(context.Background(), stream, data, 2)
 
 		e := errors.New("subtle error")
 
-		fstream := failingReader{&stream, failAt, e, 0}
+		fstream := failingReader{stream, failAt, e, 0}
 
 		dec := NewStreamReader(&fstream, 10)
 		var decBuf bytes.Buffer
@@ -172,13 +197,13 @@ func TestStreamEncodingSrcIOErrorForwarding(t *testing.T) {
 	fdata := failingReader{data, 3, e, 0}
 
 	chunkSize := uint32(2)
-	var out bytes.Buffer
-	err := WriteStream(context.Background(), &out, &fdata, chunkSize)
+	out := newMockBuffer()
+	err := WriteStream(context.Background(), out, &fdata, chunkSize)
 	if wrappedErr, ok := err.(*SourceStreamError); !ok || wrappedErr.StreamError != e {
 		t.Errorf("WriteStream should wrap reader io errors, but got: %#v", err)
 	}
 
-	dec := NewStreamReader(&out, 2)
+	dec := NewStreamReader(out, 2)
 	var decBuf bytes.Buffer
 	_, err = io.Copy(&decBuf, dec)
 	if err == nil {
@@ -206,8 +231,8 @@ func TestStreamEncodingWriteIOError(t *testing.T) {
 			readErr := errors.New("read  error")
 			data := bytes.NewBuffer(dataStr)
 			fdata := failingReader{data, readFailAt, readErr, 0}
-			var out bytes.Buffer
-			fout := failingWriter{&out, writeFailAt, writeErr, 0}
+			out := newMockBuffer()
+			fout := newFailingChunkBufferWriter(failingWriter{out, writeFailAt, writeErr, 0})
 			err := WriteStream(context.Background(), &fout, &fdata, uint32(chunkSize))
 
 			if fdata.InducedFail() && !fout.InducedFail() {
@@ -259,7 +284,7 @@ func doEncodingBenchmark(maxChunkSize uint32, copyByteCount int64, b *testing.B)
 	if b != nil {
 		b.ResetTimer()
 	}
-	WriteStream(context.Background(), dest, io.LimitReader(src, copyByteCount), maxChunkSize)
+	WriteStream(context.Background(), NetConnExportBuffersWriter{dest}, io.LimitReader(src, copyByteCount), maxChunkSize)
 	dest.Close()
 
 	<- done
