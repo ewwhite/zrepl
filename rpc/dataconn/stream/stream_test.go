@@ -13,6 +13,15 @@ import (
 	"github.com/zrepl/zrepl/util/socketpair"
 )
 
+func TestFrameTypesOk(t *testing.T) {
+	t.Logf("%v", SourceEOF)
+	assert.False(t, IsPublicFrameType(SourceEOF))
+	assert.False(t, IsPublicFrameType(SourceErr))
+	assert.True(t, IsPublicFrameType(0))
+	assert.True(t, IsPublicFrameType(1))
+	assert.True(t, IsPublicFrameType(255))
+}
+
 func TestStreamer(t *testing.T) {
 
 	anc, bnc, err := socketpair.SocketPair()
