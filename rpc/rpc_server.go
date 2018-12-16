@@ -6,13 +6,12 @@ import (
 	"github.com/zrepl/zrepl/transport"
 	"github.com/zrepl/zrepl/rpc/versionhandshake"
 	"github.com/zrepl/zrepl/util/envconst"
-	"io"
 	"net"
 	"time"
 
 	"github.com/zrepl/zrepl/config"
 	"github.com/zrepl/zrepl/daemon/logging"
-	"github.com/zrepl/zrepl/rpc/dataconn"
+	"github.com/zrepl/zrepl/rpc/dataconn/dataconn3"
 	"github.com/zrepl/zrepl/rpc/grpcclientidentity"
 	"github.com/zrepl/zrepl/rpc/netadaptor"
 	"github.com/zrepl/zrepl/endpoint"
@@ -22,8 +21,7 @@ import (
 
 type Handler interface {
 	pdu.ReplicationServer
-	Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, io.ReadCloser, error)
-	Receive(ctx context.Context, r *pdu.ReceiveReq, stream io.Reader) (*pdu.ReceiveRes, error) // TODO ReadCloser?
+	dataconn.Handler
 }
 
 type ServerConfig struct {
@@ -103,7 +101,7 @@ func NewServer(config ServerConfig, handler Handler, log Logger) *Server {
 		ci := authConn.ClientIdentity()
 		return context.WithValue(ctx, endpoint.ClientIdentityKey, ci), wire
 	}
-	dataServer := dataconn.NewServer(handler, config.DataConn, dataServerClientIdentitySetter)
+	dataServer := dataconn.NewServer(dataServerClientIdentitySetter, dataLog, handler)
 	dataServerServe := func(ctx context.Context, dataListener transport.AuthenticatedListener, errOut chan<- error) {
 		dataNetListener := netadaptor.New(dataListener, dataLog)
 		dataServer.Serve(ctx, dataNetListener)

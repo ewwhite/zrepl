@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"os/exec"
 	"strings"
 
@@ -460,6 +461,9 @@ func ZFSRecv(ctx context.Context, fs string, stream io.Reader, additionalArgs ..
 	if err := validateZFSFilesystem(fs); err != nil {
 		return err
 	}
+
+	_, err = io.Copy(ioutil.Discard, stream)
+	return err
 
 	args := make([]string, 0)
 	args = append(args, "recv")

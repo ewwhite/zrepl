@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/zrepl/zrepl/logger"
+	"github.com/zrepl/zrepl/rpc/dataconn/dataconn3"
 	"github.com/zrepl/zrepl/replication/pdu"
 	"github.com/zrepl/zrepl/util"
 )
@@ -51,7 +52,7 @@ type Sender interface {
 type Receiver interface {
 	// Receive sends r and sendStream (the latter containing a ZFS send stream)
 	// to the parent github.com/zrepl/zrepl/replication.Endpoint.
-	Receive(ctx context.Context, r *pdu.ReceiveReq, sendStream io.Reader) (*pdu.ReceiveRes, error)
+	Receive(ctx context.Context, req *pdu.ReceiveReq, receive dataconn.StreamCopier) (*pdu.ReceiveRes, error)
 }
 
 type StepReport struct {
@@ -424,7 +425,10 @@ func (s *ReplicationStep) doReplication(ctx context.Context, ka *watchdog.KeepAl
 		ClearResumeToken: !sres.UsedResumeToken,
 	}
 	log.Debug("initiate receive request")
-	_, err = receiver.Receive(ctx, rr, sstream)
+	_, err = receiver.Receive(ctx, rr, func(w io.Writer) error {
+		_, err := io.Copy(w, sstream)	
+		return err
+	})
 	if err != nil {
 		log.
 			WithError(err).
