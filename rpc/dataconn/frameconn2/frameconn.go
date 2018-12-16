@@ -18,6 +18,17 @@ type FrameHeader struct {
 	PayloadLen uint32
 }
 
+// The 4 MSBs of ft are reserved for frameconn.
+func IsPublicFrameType(ft uint32) bool {
+	return (0xf<<28)&ft == 0
+}
+
+func assertPublicFrameType(frameType uint32) {
+	if !IsPublicFrameType(frameType) {
+		panic(fmt.Sprintf("frameconn: frame type %v is reserved for frameconn implementation", frameType))
+	}
+}
+
 func (f *FrameHeader) Unmarshal(buf []byte) {
 	if len(buf) != 8 {
 		panic(fmt.Sprintf("frame header is 8 bytes long"))
@@ -114,6 +125,11 @@ func (c *Conn) ReadFrame() (Frame, error) {
 }
 
 func (c *Conn) WriteFrame(payload []byte, frameType uint32) error {
+	assertPublicFrameType(frameType)
+	return c.writeFrame(payload, frameType)
+}
+
+func (c *Conn) writeFrame(payload []byte, frameType uint32) error {
 	c.writeMtx.Lock()
 	defer c.writeMtx.Unlock()
 
