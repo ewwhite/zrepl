@@ -35,7 +35,7 @@ func TestReadTimeout(t *testing.T) {
 
 	go func() {
 		defer wg.Done()
-		conn := New(b, 100*time.Millisecond)
+		conn := Wrap(b, 100*time.Millisecond)
 		buf := [4]byte{} // shorter than message put on wire
 		n, err := conn.Read(buf[:])
 		assert.Equal(t, 0, n)
@@ -66,7 +66,7 @@ func TestWriteTimeout(t *testing.T) {
 	var buf bytes.Buffer
 	buf.WriteString("message")
 	blockConn := writeBlockConn{a, 500 * time.Millisecond}
-	conn := New(blockConn, 100*time.Millisecond)
+	conn := Wrap(blockConn, 100*time.Millisecond)
 	n, err := conn.Write(buf.Bytes())
 	assert.Equal(t, 0, n)
 	assert.Error(t, err)
@@ -92,7 +92,7 @@ func TestNoPartialReadsDueToDeadline(t *testing.T) {
 
 	go func() {
 		defer wg.Done()
-		bc := New(b, 100*time.Millisecond)
+		bc := Wrap(b, 100*time.Millisecond)
 		beginRead := time.Now()
 		var fillBuf [10]byte
 		bc.Read(fillBuf[:])
@@ -153,7 +153,7 @@ func TestNoPartialWritesDueToDeadline(t *testing.T) {
 	var buf bytes.Buffer
 	buf.WriteString("message")
 	blockConn := writeBlockConn{a, 150 * time.Millisecond}
-	conn := New(blockConn, 100*time.Millisecond)
+	conn := Wrap(blockConn, 100*time.Millisecond)
 	n, err := conn.Write(buf.Bytes())
 	assert.Equal(t, 0, n)
 	assert.Error(t, err)

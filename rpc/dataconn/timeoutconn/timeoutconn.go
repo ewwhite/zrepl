@@ -1,9 +1,7 @@
 package timeoutconn
 
 import (
-	"fmt"
 	"net"
-	"os"
 	"time"
 )
 
@@ -12,11 +10,11 @@ type Conn struct {
 	idleTimeout time.Duration
 }
 
-func New(conn net.Conn, idleTimeout time.Duration) Conn {
+func Wrap(conn net.Conn, idleTimeout time.Duration) Conn {
 	return Conn{Conn: conn, idleTimeout: idleTimeout}
 }
 
-func (c *Conn) Read(p []byte) (n int, err error) {
+func (c Conn) Read(p []byte) (n int, err error) {
 	n = 0
 	err = nil
 restart:
@@ -25,7 +23,6 @@ restart:
 	}
 	var nCurRead int
 	nCurRead, err = c.Conn.Read(p[n:len(p)])
-	fmt.Fprintf(os.Stderr, "c.Conn.Read => %v %v %v\n", nCurRead, n, err)
 	n += nCurRead
 	if netErr, ok := err.(net.Error); ok && netErr.Timeout() && nCurRead > 0 {
 		err = nil
@@ -34,7 +31,7 @@ restart:
 	return n, err
 }
 
-func (c *Conn) Write(p []byte) (n int, err error) {
+func (c Conn) Write(p []byte) (n int, err error) {
 	n = 0
 restart:
 	if err := c.SetDeadline(time.Now().Add(c.idleTimeout)); err != nil {
