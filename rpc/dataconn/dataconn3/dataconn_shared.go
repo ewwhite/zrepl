@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/go-playground/validator"
-	"github.com/zrepl/zrepl/rpc/dataconn/frameconn2"
+	"github.com/zrepl/zrepl/rpc/dataconn/heartbeatconn"
 	"github.com/zrepl/zrepl/rpc/dataconn/stream"
 )
 
@@ -37,18 +37,13 @@ const (
 )
 
 const (
-	HeartbeatInterval = 5 * time.Second
-	HeartbeatPeerTimeout  = 10 * time.Second
+	HeartbeatInterval    = 5 * time.Second
+	HeartbeatPeerTimeout = 10 * time.Second
 )
 
 var readMessageSentinel = fmt.Errorf("read stream complete")
 
-type FrameConn interface {
-	ReadFrame() (frameconn.Frame, error)
-	WriteFrame(payload []byte, frameType uint32) error
-}
-
-func readMessage(ctx context.Context, conn FrameConn, maxSize uint32, frameType uint32) (b []byte, err error) {
+func readMessage(ctx context.Context, conn *heartbeatconn.Conn, maxSize uint32, frameType uint32) (b []byte, err error) {
 	r, w := io.Pipe()
 	var buf bytes.Buffer
 	var wg sync.WaitGroup
