@@ -9,7 +9,7 @@ import (
 
 	"github.com/golang/protobuf/proto"
 	"github.com/zrepl/zrepl/replication/pdu"
-	"github.com/zrepl/zrepl/rpc/dataconn/frameconn2"
+	"github.com/zrepl/zrepl/rpc/dataconn/heartbeatconn"
 	"github.com/zrepl/zrepl/rpc/dataconn/stream"
 	"github.com/zrepl/zrepl/transport"
 )
@@ -34,7 +34,7 @@ func NewClient(connecter transport.Connecter, log Logger) *Client {
 	}
 }
 
-func (c *Client) send(ctx context.Context, conn *frameconn.Conn, endpoint string, req proto.Message, sendStream io.Reader) error {
+func (c *Client) send(ctx context.Context, conn *heartbeatconn.Conn, endpoint string, req proto.Message, sendStream io.Reader) error {
 
 	var buf bytes.Buffer
 	_, memErr := buf.WriteString(endpoint)
@@ -61,7 +61,7 @@ func (c *Client) send(ctx context.Context, conn *frameconn.Conn, endpoint string
 	}
 }
 
-func (c *Client) recv(ctx context.Context, conn *frameconn.Conn, res proto.Message) error {
+func (c *Client) recv(ctx context.Context, conn *heartbeatconn.Conn, res proto.Message) error {
 
 	headerBuf, err := readMessage(ctx, conn, 1<<15, ResHeader)
 	if err != nil {
@@ -83,16 +83,16 @@ func (c *Client) recv(ctx context.Context, conn *frameconn.Conn, res proto.Messa
 	return nil
 }
 
-func (c *Client) getWire(ctx context.Context) (*frameconn.Conn, error) {
+func (c *Client) getWire(ctx context.Context) (*heartbeatconn.Conn, error) {
 	nc, err := c.cn.Connect(ctx)
 	if err != nil {
 		return nil, err
 	}
-	conn := frameconn.Wrap(nc)
+	conn := heartbeatconn.Wrap(nc, HeartbeatInterval, HeartbeatPeerTimeout)
 	return conn, nil
 }
 
-func (c *Client) putWire(conn *frameconn.Conn) {
+func (c *Client) putWire(conn *heartbeatconn.Conn) {
 	if err := conn.Close(); err != nil {
 		c.log.WithError(err).Error("error closing connection")
 	}

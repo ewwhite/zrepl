@@ -8,7 +8,8 @@ import (
 
 	"github.com/zrepl/zrepl/logger"
 	"github.com/zrepl/zrepl/rpc/dataconn/base2bufpool"
-	"github.com/zrepl/zrepl/rpc/dataconn/frameconn2"
+	frameconn "github.com/zrepl/zrepl/rpc/dataconn/frameconn2"
+	"github.com/zrepl/zrepl/rpc/dataconn/heartbeatconn"
 )
 
 type Logger = logger.Logger
@@ -33,29 +34,30 @@ func getLog(ctx context.Context) Logger {
 
 // The following frameconn.Frame.Type are reserved for Streamer.
 const (
-	SourceEOF uint32 = 1 << 24
+	SourceEOF uint32 = 1 << 16
 	SourceErr
 	// max 16
 )
+
 // NOTE: make sure to add a tests for each frame type that checks
 //       whether it is frameconn.IsPublicFrameType()
 
 // Check whether the given frame type is allowed to be used by
 // consumers of this package. Intended for use in unit tests.
 func IsPublicFrameType(ft uint32) bool {
-	// 4 MSBs are reserved for frameconn, next 4 MSB are reserved for us.
-	return frameconn.IsPublicFrameType(ft) && ((0xf << 24) & ft == 0)
+	// 4 MSBs are reserved for frameconn, next 4 MSB for heartbeatconn, next 4 MSB for us.
+	return frameconn.IsPublicFrameType(ft) && ((0xf<<16)&ft == 0)
 }
 
 func assertPublicFrameType(frameType uint32) {
 	if !IsPublicFrameType(frameType) {
-		panic(fmt.Sprintf("frameconn: frame type %v is reserved for frameconn implementation", frameType))
+		panic(fmt.Sprintf("stream: frame type %v cannot be used by consumers of this package", frameType))
 	}
 }
 
 // if sendStream returns an error, that error will be sent as a trailer to the client
 // ok will return nil, though.
-func WriteStream(ctx context.Context, c *frameconn.Conn, stream io.Reader, stype uint32) error {
+func WriteStream(ctx context.Context, c *heartbeatconn.Conn, stream io.Reader, stype uint32) error {
 
 	if stype == 0 {
 		panic("stype must be non-zero")
@@ -114,7 +116,7 @@ func WriteStream(ctx context.Context, c *frameconn.Conn, stream io.Reader, stype
 }
 
 // ReadStream will close c if an error reading  from c or writing to receiver occurs
-func ReadStream(ctx context.Context, c *frameconn.Conn, receiver io.Writer, stype uint32) (err error) {
+func ReadStream(ctx context.Context, c *heartbeatconn.Conn, receiver io.Writer, stype uint32) (err error) {
 
 	type read struct {
 		f   frameconn.Frame

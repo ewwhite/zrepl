@@ -25,7 +25,7 @@ func IsPublicFrameType(ft uint32) bool {
 
 func assertPublicFrameType(frameType uint32) {
 	if !IsPublicFrameType(frameType) {
-		panic(fmt.Sprintf("frameconn: frame type %v is reserved for frameconn implementation", frameType))
+		panic(fmt.Sprintf("frameconn: frame type %v cannot be used by consumers of this package", frameType))
 	}
 }
 

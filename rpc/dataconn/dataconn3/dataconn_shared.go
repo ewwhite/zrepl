@@ -36,9 +36,19 @@ const (
 	Stream
 )
 
+const (
+	HeartbeatInterval = 5 * time.Second
+	HeartbeatPeerTimeout  = 10 * time.Second
+)
+
 var readMessageSentinel = fmt.Errorf("read stream complete")
 
-func readMessage(ctx context.Context, conn *frameconn.Conn, maxSize uint32, frameType uint32) (b []byte, err error) {
+type FrameConn interface {
+	ReadFrame() (frameconn.Frame, error)
+	WriteFrame(payload []byte, frameType uint32) error
+}
+
+func readMessage(ctx context.Context, conn FrameConn, maxSize uint32, frameType uint32) (b []byte, err error) {
 	r, w := io.Pipe()
 	var buf bytes.Buffer
 	var wg sync.WaitGroup
