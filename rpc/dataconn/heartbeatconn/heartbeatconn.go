@@ -81,9 +81,8 @@ func (c *Conn) Close() error {
 		}
 		close(c.stopSend)
 		close(c.stopWatch)
-		return c.fc.Close()
 	}
-	return nil
+	return c.fc.Close()
 }
 
 // started as a goroutine in constructor
