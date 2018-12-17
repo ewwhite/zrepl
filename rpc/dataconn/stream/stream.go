@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/zrepl/zrepl/logger"
 	"github.com/zrepl/zrepl/rpc/dataconn/base2bufpool"
@@ -115,8 +116,23 @@ func WriteStream(ctx context.Context, c *heartbeatconn.Conn, stream io.Reader, s
 	return nil
 }
 
+type ReadStreamErrorKind int
+
+const (
+	ReadStreamErrorKindConn ReadStreamErrorKind = 1 + iota
+	ReadStreamErrorKindWrite
+	ReadStreamErrorKindSource
+	ReadStreamErrorKindSourceErrEncoding
+	ReadStreamErrorKindUnexpectedFrameType
+)
+
+type ReadStreamError struct {
+	Kind ReadStreamErrorKind
+	Err  error
+}
+
 // ReadStream will close c if an error reading  from c or writing to receiver occurs
-func ReadStream(ctx context.Context, c *heartbeatconn.Conn, receiver io.Writer, stype uint32) (err error) {
+func ReadStream(ctx context.Context, c *heartbeatconn.Conn, receiver io.Writer, stype uint32) *ReadStreamError {
 
 	type read struct {
 		f   frameconn.Frame
@@ -139,7 +155,7 @@ func ReadStream(ctx context.Context, c *heartbeatconn.Conn, receiver io.Writer, 
 	for read := range reads {
 		f = read.f
 		if read.err != nil {
-			return read.err
+			return &ReadStreamError{ReadStreamErrorKindConn, read.err}
 		}
 		if f.Header.Type != stype {
 			break
@@ -148,11 +164,11 @@ func ReadStream(ctx context.Context, c *heartbeatconn.Conn, receiver io.Writer, 
 		n, err := receiver.Write(f.Buffer.Bytes())
 		if err != nil {
 			f.Buffer.Free()
-			return err // FIXME wrap as writer error
+			return &ReadStreamError{ReadStreamErrorKindWrite, err} // FIXME wrap as writer error
 		}
 		if n != len(f.Buffer.Bytes()) {
 			f.Buffer.Free()
-			return io.ErrShortWrite
+			return &ReadStreamError{ReadStreamErrorKindWrite, io.ErrShortWrite}
 		}
 		f.Buffer.Free()
 	}
@@ -162,8 +178,11 @@ func ReadStream(ctx context.Context, c *heartbeatconn.Conn, receiver io.Writer, 
 	}
 
 	if f.Header.Type == SourceErr {
-		return fmt.Errorf("stream error: %q", string(f.Buffer.Bytes())) // FIXME
+		if !utf8.Valid(f.Buffer.Bytes()) {
+			return &ReadStreamError{ReadStreamErrorKindSourceErrEncoding, fmt.Errorf("source error, but not encoded as UTF-8")}
+		}
+		return &ReadStreamError{ReadStreamErrorKindSource, fmt.Errorf("%s", string(f.Buffer.Bytes()))}
 	}
 
-	return fmt.Errorf("received unexpected frame type: %v", f.Header.Type)
+	return &ReadStreamError{ReadStreamErrorKindUnexpectedFrameType, fmt.Errorf("unexpected frame type")}
 }
