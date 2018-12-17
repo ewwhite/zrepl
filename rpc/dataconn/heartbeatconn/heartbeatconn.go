@@ -139,10 +139,12 @@ func (c *Conn) watchHeartbeats() {
 				return atomic.CompareAndSwapInt32(&c.state, stateInitial, statePeerDead)
 			}()
 			if peerDeadEdge {
-				// c.Close() will unblock ReadFrame and WriteFrame,
-				// so make sure opErr is visible to those calls before close
-				c.opErr.Store(HeartbeatTimeout{})
-				c.Close()
+				fmt.Fprintf(os.Stderr, "peer dead\n")
+				err := c.Close()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "clsoe err: %T %s\n", err, err)
+				}
+				fmt.Fprintf(os.Stderr, "close done\n")
 				return
 			}
 		}
