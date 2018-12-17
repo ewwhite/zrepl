@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"sync"
-	"sync/atomic"
 
 	"github.com/zrepl/zrepl/rpc/dataconn/base2bufpool"
 )
@@ -44,14 +43,12 @@ type Conn struct {
 	readNextValid     bool
 	readNext          FrameHeader
 	bufPool           *base2bufpool.Pool // no need for sync around it
-	state             int32
 }
 
 func Wrap(nc net.Conn) *Conn {
 	return &Conn{
 		nc: nc,
 		//		ncBuf: bufio.NewReadWriter(bufio.NewReaderSize(nc, 1<<23), bufio.NewWriterSize(nc, 1<<23)),
-		state:         stateInitial,
 		bufPool:       base2bufpool.New(15, 22),
 		readNext:      FrameHeader{},
 		readNextValid: false,
@@ -144,21 +141,6 @@ func (c *Conn) writeFrame(payload []byte, frameType uint32) error {
 	return nil
 }
 
-const (
-	stateInitial   int32 = 0
-	stateUnusuable int32 = 1
-	stateClosed    int32 = 2
-)
-
-func (c *Conn) renderUnusable() {
-	atomic.CompareAndSwapInt32(&c.state, stateInitial, stateUnusuable)
-}
-
 func (c *Conn) Close() error {
-	edgeOne := atomic.CompareAndSwapInt32(&c.state, stateInitial, stateClosed)
-	edgeTwo := atomic.CompareAndSwapInt32(&c.state, stateUnusuable, stateClosed)
-	if edgeOne || edgeTwo {
-		return c.nc.Close()
-	}
-	return nil
+	return c.nc.Close()
 }
