@@ -89,6 +89,8 @@ func (s *Server) Serve(ctx context.Context, l net.Listener) {
 }
 
 func (s *Server) serveConn(nc net.Conn) {
+	s.log.Debug("serveConn begin")
+	defer s.log.Debug("serveConn done")
 
 	ctx := context.Background()
 	if s.wi != nil {
@@ -114,6 +116,8 @@ func (s *Server) serveConn(nc net.Conn) {
 		s.log.WithError(err).Error("error reading structured part")
 		return
 	}
+
+	s.log.WithField("endpoint", endpoint).Debug("calling handler")
 
 	var res proto.Message
 	var sendStream io.ReadCloser
@@ -141,6 +145,8 @@ func (s *Server) serveConn(nc net.Conn) {
 		handlerErr = fmt.Errorf("requested endpoint does not exist")
 		return
 	}
+
+	s.log.WithField("endpoint", endpoint).Debug("handler returned")
 
 	var resHeaderBuf bytes.Buffer
 	if handlerErr == nil {
