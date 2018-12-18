@@ -67,15 +67,16 @@ func WriteStream(ctx context.Context, c *heartbeatconn.Conn, stream io.Reader, s
 	}
 	assertPublicFrameType(stype)
 
-	bufpool := base2bufpool.New(19, 19)
+	const FramePayloadShift = 19
+	bufpool := base2bufpool.New(1 << FramePayloadShift, 1 << FramePayloadShift)
 	type read struct {
 		buf base2bufpool.Buffer
 		err error
 	}
-	reads := make(chan read, 1)
+	reads := make(chan read, 5)
 	go func() {
 		for {
-			buffer := bufpool.Get(1 << 19)
+			buffer := bufpool.Get(1 << FramePayloadShift)
 			bufferBytes := buffer.Bytes()
 			n, err := io.ReadFull(stream, bufferBytes)
 			buffer.Shrink(uint(n))
@@ -190,7 +191,7 @@ func ReadStream(c *heartbeatconn.Conn, receiver io.Writer, stype uint32) *ReadSt
 		f   frameconn.Frame
 		err error
 	}
-	reads := make(chan read, 1)
+	reads := make(chan read, 5)
 	go func() {
 		for {
 			var r read
