@@ -8,13 +8,12 @@ import (
 	"fmt"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/zrepl/zrepl/util/watchdog"
-	"io"
 	"net"
 	"sync"
 	"time"
 
+	"github.com/zrepl/zrepl/zfs"
 	"github.com/zrepl/zrepl/logger"
-	"github.com/zrepl/zrepl/rpc/dataconn/dataconn3"
 	"github.com/zrepl/zrepl/replication/pdu"
 	"github.com/zrepl/zrepl/util"
 )
@@ -44,7 +43,7 @@ type Sender interface {
 	// If a non-nil io.ReadCloser is returned, it is guaranteed to be closed before
 	// any next call to the parent github.com/zrepl/zrepl/replication.Endpoint.
 	// If the send request is for dry run the io.ReadCloser will be nil
-	Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, io.ReadCloser, error)
+	Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, zfs.StreamCopier, error)
 	ReplicationCursor(ctx context.Context, req *pdu.ReplicationCursorReq) (*pdu.ReplicationCursorRes, error)
 }
 
@@ -52,7 +51,7 @@ type Sender interface {
 type Receiver interface {
 	// Receive sends r and sendStream (the latter containing a ZFS send stream)
 	// to the parent github.com/zrepl/zrepl/replication.Endpoint.
-	Receive(ctx context.Context, req *pdu.ReceiveReq, receive dataconn.StreamCopier) (*pdu.ReceiveRes, error)
+	Receive(ctx context.Context, req *pdu.ReceiveReq, receive zfs.StreamCopier) (*pdu.ReceiveRes, error)
 }
 
 type StepReport struct {
@@ -400,35 +399,32 @@ func (s *ReplicationStep) doReplication(ctx context.Context, ka *watchdog.KeepAl
 	sr := s.buildSendRequest(false)
 
 	log.Debug("initiate send request")
-	sres, sstream, err := sender.Send(ctx, sr)
+	sres, sstreamCopier, err := sender.Send(ctx, sr)
 	if err != nil {
 		log.WithError(err).Error("send request failed")
 		return err
 	}
-	if sstream == nil {
+	if sstreamCopier == nil {
 		err := errors.New("send request did not return a stream, broken endpoint implementation")
 		return err
 	}
-	defer sstream.Close()
+	defer sstreamCopier.Close()
 
-	s.byteCounter = util.NewByteCounterReader(sstream)
-	s.byteCounter.SetCallback(1*time.Second, func(i int64) {
-		ka.MadeProgress()
-	})
-	defer func() {
-		s.parent.promBytesReplicated.Add(float64(s.byteCounter.Bytes()))
-	}()
-	sstream = s.byteCounter
+	//s.byteCounter = util.NewByteCounterReader(sstream)
+	//s.byteCounter.SetCallback(1*time.Second, func(i int64) {
+	//	ka.MadeProgress()
+	//})
+	//defer func() {
+	//	s.parent.promBytesReplicated.Add(float64(s.byteCounter.Bytes()))
+	//}()
+	//sstream = s.byteCounter
 
 	rr := &pdu.ReceiveReq{
 		Filesystem:       fs,
 		ClearResumeToken: !sres.UsedResumeToken,
 	}
 	log.Debug("initiate receive request")
-	_, err = receiver.Receive(ctx, rr, func(w io.Writer) error {
-		_, err := io.Copy(w, sstream)	
-		return err
-	})
+	_, err = receiver.Receive(ctx, rr, sstreamCopier)
 	if err != nil {
 		log.
 			WithError(err).

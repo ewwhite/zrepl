@@ -4,31 +4,27 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"time"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/zrepl/zrepl/logger"
 	"github.com/zrepl/zrepl/replication/pdu"
-	"github.com/zrepl/zrepl/rpc/dataconn/heartbeatconn"
-	"github.com/zrepl/zrepl/rpc/dataconn/stream"
+	"github.com/zrepl/zrepl/zfs"
 )
 
 // WireInterceptor has a chance to exchange the context and connection on each client connection.
 type WireInterceptor func(ctx context.Context, conn net.Conn) (context.Context, net.Conn)
 
-type StreamCopier func(io.Writer) error
-
 // Handler implements the functionality that is exposed by Server to the Client.
 type Handler interface {
 	// Send handles a SendRequest.
 	// The returned io.ReadCloser is allowed to be nil, for example if the requested Send is a dry-run.
-	Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, io.ReadCloser, error)
+	Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, zfs.StreamCopier, error)
 	// Receive handles a ReceiveRequest.
 	// It is guaranteed that Server calls Receive with a stream that holds the IdleConnTimeout
 	// configured in ServerConfig.Shared.IdleConnTimeout.
-	Receive(ctx context.Context, r *pdu.ReceiveReq, receive StreamCopier) (*pdu.ReceiveRes, error)
+	Receive(ctx context.Context, r *pdu.ReceiveReq, receive zfs.StreamCopier) (*pdu.ReceiveRes, error)
 }
 
 type Logger = logger.Logger
@@ -97,21 +93,22 @@ func (s *Server) serveConn(nc net.Conn) {
 		ctx, nc = s.wi(ctx, nc)
 	}
 
-	c := heartbeatconn.Wrap(nc, HeartbeatInterval, HeartbeatPeerTimeout)
+	c:= wrap(nc, HeartbeatInterval, HeartbeatPeerTimeout)
 	defer func() {
+		s.log.Debug("close client connection")
 		if err := c.Close(); err != nil {
 			s.log.WithError(err).Error("cannot close client connection")
 		}
 	}()
 
-	header, err := readMessage(ctx, c, 1<<15, ReqHeader)
+	header, err := c.ReadStreamedMessage(ctx, 1<<15, ReqHeader)
 	if err != nil {
 		s.log.WithError(err).Error("error reading structured part")
 		return
 	}
 	endpoint := string(header)
 
-	reqStructured, err := readMessage(ctx, c, 1<<22, ReqStructured)
+	reqStructured, err := c.ReadStreamedMessage(ctx, 1<<22, ReqStructured)
 	if err != nil {
 		s.log.WithError(err).Error("error reading structured part")
 		return
@@ -120,7 +117,7 @@ func (s *Server) serveConn(nc net.Conn) {
 	s.log.WithField("endpoint", endpoint).Debug("calling handler")
 
 	var res proto.Message
-	var sendStream io.ReadCloser
+	var sendStream zfs.StreamCopier
 	var handlerErr error
 	switch endpoint {
 	case EndpointSend:
@@ -136,17 +133,27 @@ func (s *Server) serveConn(nc net.Conn) {
 			s.log.WithError(err).Error("cannot unmarshal receive request")
 			return
 		}
-		receive := func(w io.Writer) error {
-			return stream.ReadStream(ctx, c, w, Stream)
-		}
-		res, handlerErr = s.h.Receive(ctx, &req, receive) // SHADOWING
+		c.setAllowWriteStreamTo()
+		res, handlerErr = s.h.Receive(ctx, &req, c) // SHADOWING
 	default:
 		s.log.WithField("endpoint", endpoint).Error("unknown endpoint")
 		handlerErr = fmt.Errorf("requested endpoint does not exist")
 		return
 	}
 
-	s.log.WithField("endpoint", endpoint).Debug("handler returned")
+	s.log.WithField("endpoint", endpoint).WithField("errType", fmt.Sprintf("%T", handlerErr)).Debug("handler returned")
+
+	// prepare protobuf ahead to return the protobuf error in the header
+	// if marshaling fails. We consider failed marshaling a handler error
+	var protobuf *bytes.Buffer
+	if handlerErr == nil {
+		protobufBytes, err := proto.Marshal(res)
+		if err != nil {
+			s.log.WithError(err).Error("cannot marshal handler protobuf")
+			handlerErr = err
+		}
+		protobuf = bytes.NewBuffer(protobufBytes) // SHADOWING
+	}
 
 	var resHeaderBuf bytes.Buffer
 	if handlerErr == nil {
@@ -155,29 +162,23 @@ func (s *Server) serveConn(nc net.Conn) {
 		resHeaderBuf.WriteString("HANDLER ERROR:\n")
 		resHeaderBuf.WriteString(handlerErr.Error())
 	}
-	if err := stream.WriteStream(ctx, c, &resHeaderBuf, ResHeader); err != nil {
+	if err := c.WriteStreamedMessage(ctx, &resHeaderBuf, ResHeader); err != nil {
 		s.log.WithError(err).Error("cannot write response header")
 		return
 	}
 
 	if handlerErr != nil {
-		s.log.Debug("stop serving connection after handler error")
+		s.log.Debug("early exit after handler error")
 		return
 	}
 
-	protobufBytes, err := proto.Marshal(res)
-	if err != nil {
-		s.log.WithError(err).Error("cannot marshal handler protobuf")
-		return
-	}
-	protobuf := bytes.NewBuffer(protobufBytes)
-	if err := stream.WriteStream(ctx, c, protobuf, ResStructured); err != nil {
+	if err := c.WriteStreamedMessage(ctx, protobuf, ResStructured); err != nil {
 		s.log.WithError(err).Error("cannot write structured part of response")
 		return
 	}
 
 	if sendStream != nil {
-		err := stream.WriteStream(ctx, c, sendStream, Stream)
+		err := c.SendStream(ctx, sendStream)
 		if err != nil {
 			s.log.WithError(err).Error("cannot write send stream")
 		}

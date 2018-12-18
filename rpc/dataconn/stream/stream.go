@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/zrepl/zrepl/zfs"
 	"github.com/zrepl/zrepl/logger"
 	"github.com/zrepl/zrepl/rpc/dataconn/base2bufpool"
 	frameconn "github.com/zrepl/zrepl/rpc/dataconn/frameconn2"
@@ -131,8 +133,58 @@ type ReadStreamError struct {
 	Err  error
 }
 
+func (e *ReadStreamError) Error() string {
+	kindStr := ""
+	switch e.Kind {
+	case ReadStreamErrorKindConn:
+		kindStr = " read error: "
+	case ReadStreamErrorKindWrite:
+		kindStr = " write error: "
+	case ReadStreamErrorKindSource:
+		kindStr = " source error: "
+	case ReadStreamErrorKindSourceErrEncoding:
+		kindStr = " source implementation error: "
+	case ReadStreamErrorKindUnexpectedFrameType:
+		kindStr = " protocol error: "
+	}
+	return fmt.Sprintf("stream:%s%s", kindStr, e.Err)
+}
+
+var _ net.Error = &ReadStreamError{}
+
+func (e ReadStreamError) netErr() net.Error {
+	if netErr, ok := e.Err.(net.Error); ok {
+		return netErr
+	}
+	return nil
+}
+
+func (e ReadStreamError) Timeout() bool {
+	if netErr := e.netErr(); netErr != nil {
+		return netErr.Timeout()
+	}
+	return false
+}
+
+func (e ReadStreamError) Temporary() bool {
+	if netErr := e.netErr(); netErr != nil {
+		return netErr.Temporary()
+	}
+	return false
+}
+
+var _ zfs.StreamCopierError = &ReadStreamError{}
+
+func (e ReadStreamError) IsReadError() bool {
+	return e.Kind != ReadStreamErrorKindWrite
+}
+
+func (e ReadStreamError) IsWriteError() bool {
+	return e.Kind == ReadStreamErrorKindWrite
+}
+
 // ReadStream will close c if an error reading  from c or writing to receiver occurs
-func ReadStream(ctx context.Context, c *heartbeatconn.Conn, receiver io.Writer, stype uint32) *ReadStreamError {
+func ReadStream(c *heartbeatconn.Conn, receiver io.Writer, stype uint32) *ReadStreamError {
 
 	type read struct {
 		f   frameconn.Frame
@@ -184,5 +236,5 @@ func ReadStream(ctx context.Context, c *heartbeatconn.Conn, receiver io.Writer, 
 		return &ReadStreamError{ReadStreamErrorKindSource, fmt.Errorf("%s", string(f.Buffer.Bytes()))}
 	}
 
-	return &ReadStreamError{ReadStreamErrorKindUnexpectedFrameType, fmt.Errorf("unexpected frame type")}
+	return &ReadStreamError{ReadStreamErrorKindUnexpectedFrameType, fmt.Errorf("unexpected frame type %v (expected %v)", f.Header.Type, stype)}
 }

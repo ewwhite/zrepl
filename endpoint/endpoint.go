@@ -7,11 +7,9 @@ import (
 	"github.com/pkg/errors"
 //	"gopkg.in/djherbis/buffer.v1"
 //	"gopkg.in/djherbis/nio.v2"
-	"github.com/zrepl/zrepl/rpc/dataconn/dataconn3"
 	"github.com/zrepl/zrepl/replication"
 	"github.com/zrepl/zrepl/replication/pdu"
 	"github.com/zrepl/zrepl/zfs"
-	"io"
 	"path"
 )
 
@@ -76,15 +74,7 @@ func (s *Sender) ListFilesystemVersions(ctx context.Context, r *pdu.ListFilesyst
 
 }
 
-type nullReader struct {}
-
-func (nullReader) Read(p []byte) (n int, err error) {
-	return len(p), nil
-}
-
-func (nullReader) Close() error { return nil }
-
-func (s *Sender) Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, io.ReadCloser, error) {
+func (s *Sender) Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, zfs.StreamCopier, error) {
 	_, err := s.filterCheckFS(r.Filesystem)
 	if err != nil {
 		return nil, nil, err
@@ -104,13 +94,11 @@ func (s *Sender) Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, io.Rea
 		return res, nil, nil
 	}
 
-	return res, nullReader{}, nil
-
-	stream, err := zfs.ZFSSend(ctx, r.Filesystem, r.From, r.To, "")
+	streamCopier, err := zfs.ZFSSend(ctx, r.Filesystem, r.From, r.To, "")
 	if err != nil {
 		return nil, nil, err
 	}
-	return res, stream, nil
+	return res, streamCopier, nil
 }
 
 func (p *Sender) DestroySnapshots(ctx context.Context, req *pdu.DestroySnapshotsReq) (*pdu.DestroySnapshotsRes, error) {
@@ -148,7 +136,7 @@ func (p *Sender) ReplicationCursor(ctx context.Context, req *pdu.ReplicationCurs
 	}
 }
 
-func (p *Sender) Receive(ctx context.Context, r *pdu.ReceiveReq, receive dataconn.StreamCopier) (*pdu.ReceiveRes, error) {
+func (p *Sender) Receive(ctx context.Context, r *pdu.ReceiveReq, receive zfs.StreamCopier) (*pdu.ReceiveRes, error) {
 	return nil, fmt.Errorf("sender does not implement Receive()")
 }
 
@@ -296,11 +284,11 @@ func (s *Receiver) ReplicationCursor(context.Context, *pdu.ReplicationCursorReq)
 	return nil, fmt.Errorf("ReplicationCursor not implemented for Receiver")
 }
 
-func (s *Receiver) Send(ctx context.Context, req *pdu.SendReq) (*pdu.SendRes, io.ReadCloser, error) {
+func (s *Receiver) Send(ctx context.Context, req *pdu.SendReq) (*pdu.SendRes, zfs.StreamCopier, error) {
 	return nil, nil, fmt.Errorf("receiver does not implement Send()")
 }
 	
-func (s *Receiver) Receive(ctx context.Context, req *pdu.ReceiveReq, receive dataconn.StreamCopier) (*pdu.ReceiveRes, error) {
+func (s *Receiver) Receive(ctx context.Context, req *pdu.ReceiveReq, receive zfs.StreamCopier) (*pdu.ReceiveRes, error) {
 	getLogger(ctx).Debug("incoming Receive")
 
 	root := s.clientRootFromCtx(ctx)
@@ -357,10 +345,10 @@ func (s *Receiver) Receive(ctx context.Context, req *pdu.ReceiveReq, receive dat
 	// TODO only to maintain the interface
 //	niobuf := buffer.New(1<<24)
 //	out,l := nio.Pipe(niobuf)
-	out, l := io.Pipe()
-	go receive(l)
+//	out, l := io.Pipe()
+//	go receive(l)
 
-	if err := zfs.ZFSRecv(ctx, lp.ToString(), out, args...); err != nil {
+	if err := zfs.ZFSRecv(ctx, lp.ToString(), receive, args...); err != nil {
 		getLogger(ctx).
 			WithError(err).
 			WithField("args", args).

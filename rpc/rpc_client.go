@@ -6,10 +6,10 @@ import (
 	"github.com/zrepl/zrepl/transport"
 	"github.com/zrepl/zrepl/rpc/versionhandshake"
 	"github.com/zrepl/zrepl/util/envconst"
-	"io"
 	"net"
 	"time"
 
+	"github.com/zrepl/zrepl/zfs"
 	"github.com/zrepl/zrepl/logger"
 	"github.com/zrepl/zrepl/config"
 	"github.com/zrepl/zrepl/rpc/dataconn/dataconn3"
@@ -108,7 +108,7 @@ func NewClient(cn transport.Connecter, config ClientConfig) *Client {
 
 // callers must ensure that the returned io.ReadCloser is closed
 // TODO expose dataClient interface to the outside world
-func (c *Client) Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, io.ReadCloser, error) {
+func (c *Client) Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, zfs.StreamCopier, error) {
 	// TODO the returned sendStream may return a read error created by the remote side
 	res, streamCopier, err := c.dataClient.ReqSend(ctx, r)
 	if err != nil {
@@ -118,19 +118,12 @@ func (c *Client) Send(ctx context.Context, r *pdu.SendReq) (*pdu.SendRes, io.Rea
 		return res, nil, nil
 	}
 
-	// FIXME this hack is only to maintain the interface
-	l, out := net.Pipe()
-	go streamCopier(l)
-
-	return res, out, nil
+	return res, streamCopier, nil
 
 }
 	
-func (c *Client) Receive(ctx context.Context, req *pdu.ReceiveReq, receive dataconn.StreamCopier) (*pdu.ReceiveRes, error)  {
-	// FIXME this hack is only to maintain the interface
-	l, out := net.Pipe()
-	go receive(l)
-	return c.dataClient.ReqRecv(ctx, req, out)
+func (c *Client) Receive(ctx context.Context, req *pdu.ReceiveReq, streamCopier zfs.StreamCopier) (*pdu.ReceiveRes, error)  {
+	return c.dataClient.ReqRecv(ctx, req, streamCopier)
 }
 
 func (c *Client) ListFilesystems(ctx context.Context, in *pdu.ListFilesystemReq) (*pdu.ListFilesystemRes, error) {

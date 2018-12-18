@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os/exec"
 	"strings"
 
@@ -142,7 +141,7 @@ type ZFSError struct {
 	WaitErr error
 }
 
-func (e ZFSError) Error() string {
+func (e *ZFSError) Error() string {
 	return fmt.Sprintf("zfs exited with error: %s\nstderr:\n%s", e.WaitErr.Error(), e.Stderr)
 }
 
@@ -188,7 +187,7 @@ func ZFSList(properties []string, zfsArgs ...string) (res [][]string, err error)
 	}
 
 	if waitErr := cmd.Wait(); waitErr != nil {
-		err := ZFSError{
+		err := &ZFSError{
 			Stderr:  stderr.Bytes(),
 			WaitErr: waitErr,
 		}
@@ -315,10 +314,62 @@ func buildCommonSendArgs(fs string, from, to string, token string) ([]string, er
 	return args, nil
 }
 
+type sendStreamCopier struct {
+	recorder readErrRecorder
+}
+
+type readErrRecorder struct {
+	*util.IOCommand
+	readErr error
+}
+
+type sendStreamCopierError struct {
+	isReadErr bool // if false, it's a write error
+	err error
+}
+
+func (e sendStreamCopierError) Error() string {
+	if e.isReadErr {
+		return fmt.Sprintf("stream: read error: %s", e.err)
+	} else {
+		return fmt.Sprintf("stream: writer error: %S", e.err)
+	}
+}
+
+func (e sendStreamCopierError) IsReadError() bool { return e.isReadErr }
+func (e sendStreamCopierError) IsWriteError() bool { return !e.isReadErr }
+
+func (r *readErrRecorder) Read(p []byte) (n int, err error) {
+	n, err = r.IOCommand.Read(p)	
+	r.readErr = err
+	return n, err
+}
+
+func newSendStreamCopier(stream *util.IOCommand) *sendStreamCopier {
+	return &sendStreamCopier{recorder: readErrRecorder{stream, nil}}
+}
+
+func (c sendStreamCopier) WriteStreamTo(w io.Writer) StreamCopierError {
+	_, err := io.Copy(w, &c.recorder)
+	if err != nil {
+		if c.recorder.readErr != nil {
+			return sendStreamCopierError{isReadErr: true, err: c.recorder.readErr}
+		} else {
+			return sendStreamCopierError{isReadErr: false, err: err}
+		}
+	}
+	return nil
+}
+
+func (c sendStreamCopier) Close() error {
+	return c.recorder.IOCommand.Close()
+}
+
+
 // if token != "", then send -t token is used
 // otherwise send [-i from] to is used
 // (if from is "" a full ZFS send is done)
-func ZFSSend(ctx context.Context, fs string, from, to string, token string) (stream io.ReadCloser, err error) {
+func ZFSSend(ctx context.Context, fs string, from, to string, token string) (streamCopier StreamCopier, err error) {
 
 	args := make([]string, 0)
 	args = append(args, "send")
@@ -329,9 +380,9 @@ func ZFSSend(ctx context.Context, fs string, from, to string, token string) (str
 	}
 	args = append(args, sargs...)
 
-	stream, err = util.RunIOCommand(ctx, ZFS_BINARY, args...)
+	stream, err := util.RunIOCommand(ctx, ZFS_BINARY, args...)
 
-	return
+	return newSendStreamCopier(stream), err
 }
 
 
@@ -455,15 +506,23 @@ func ZFSSendDry(fs string, from, to string, token string) (_ *DrySendInfo, err e
 	return &si, nil
 }
 
+type StreamCopierError interface {
+	error
+	IsReadError() bool
+	IsWriteError() bool
+}
 
-func ZFSRecv(ctx context.Context, fs string, stream io.Reader, additionalArgs ...string) (err error) {
+type StreamCopier interface {
+	WriteStreamTo(w io.Writer) StreamCopierError
+	Close() error
+}
+
+
+func ZFSRecv(ctx context.Context, fs string, streamCopier StreamCopier, additionalArgs ...string) (err error) {
 
 	if err := validateZFSFilesystem(fs); err != nil {
 		return err
 	}
-
-	_, err = io.Copy(ioutil.Discard, stream)
-	return err
 
 	args := make([]string, 0)
 	args = append(args, "recv")
@@ -472,6 +531,8 @@ func ZFSRecv(ctx context.Context, fs string, stream io.Reader, additionalArgs ..
 	}
 	args = append(args, fs)
 
+	ctx, cancelCmd := context.WithCancel(ctx)
+	defer cancelCmd()
 	cmd := exec.CommandContext(ctx, ZFS_BINARY, args...)
 
 	stderr := bytes.NewBuffer(make([]byte, 0, 1024))
@@ -484,21 +545,42 @@ func ZFSRecv(ctx context.Context, fs string, stream io.Reader, additionalArgs ..
 	stdout := bytes.NewBuffer(make([]byte, 0, 1024))
 	cmd.Stdout = stdout
 
-	cmd.Stdin = stream
-
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	
 	if err = cmd.Start(); err != nil {
 		return
 	}
 
-	if err = cmd.Wait(); err != nil {
-		err = ZFSError{
-			Stderr:  stderr.Bytes(),
-			WaitErr: err,
+	copierErrChan := make(chan StreamCopierError)
+	go func() {
+		copierErrChan <- streamCopier.WriteStreamTo(stdin)
+	}()
+	waitErrChan := make(chan *ZFSError)
+	go func() {
+		defer close(waitErrChan)
+		if err = cmd.Wait(); err != nil {
+			waitErrChan <- &ZFSError{
+				Stderr:  stderr.Bytes(),
+				WaitErr: err,
+			}
+			return
 		}
-		return
-	}
+	}()
 
-	return nil
+	// streamCopier always fails before or simultaneously with Wait
+	// thus receive from it first
+	copierErr := <- copierErrChan
+	if copierErr != nil {
+		cancelCmd()	
+	}
+	waitErr := <- waitErrChan
+	if copierErr != nil && copierErr.IsWriteError() && waitErr != nil {
+		return waitErr // has more interesting info in that case
+	}
+	return copierErr // if it's not a write error, the copier error is more interesting
 }
 
 type ClearResumeTokenError struct {
@@ -576,7 +658,7 @@ func zfsSet(path string, props *ZFSProperties) (err error) {
 	}
 
 	if err = cmd.Wait(); err != nil {
-		err = ZFSError{
+		err = &ZFSError{
 			Stderr:  stderr.Bytes(),
 			WaitErr: err,
 		}
@@ -693,7 +775,7 @@ func ZFSDestroy(dataset string) (err error) {
 	}
 
 	if err = cmd.Wait(); err != nil {
-		err = ZFSError{
+		err = &ZFSError{
 			Stderr:  stderr.Bytes(),
 			WaitErr: err,
 		}
@@ -727,7 +809,7 @@ func ZFSSnapshot(fs *DatasetPath, name string, recursive bool) (err error) {
 	}
 
 	if err = cmd.Wait(); err != nil {
-		err = ZFSError{
+		err = &ZFSError{
 			Stderr:  stderr.Bytes(),
 			WaitErr: err,
 		}
@@ -755,7 +837,7 @@ func ZFSBookmark(fs *DatasetPath, snapshot, bookmark string) (err error) {
 	}
 
 	if err = cmd.Wait(); err != nil {
-		err = ZFSError{
+		err = &ZFSError{
 			Stderr:  stderr.Bytes(),
 			WaitErr: err,
 		}
