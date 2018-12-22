@@ -128,7 +128,10 @@ func (j *PassiveSide) Run(ctx context.Context) {
 	}
 
 	rpcLog := logging.LogSubsystem(log, logging.SubsysRPC)
-	server := rpc.NewServer(j.validatedServerConfig, handler, rpcLog)
+	ctxInterceptor := func(handlerCtx context.Context) context.Context {
+		return logging.WithSubsystemLoggers(handlerCtx, log)
+	}
+	server := rpc.NewServer(j.validatedServerConfig, handler, rpcLog, ctxInterceptor)
 
 	listener, err := j.listen()
 	if err != nil {

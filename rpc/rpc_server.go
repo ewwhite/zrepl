@@ -67,8 +67,10 @@ type Server struct {
 
 type serverContextKey int
 
+type HandlerContextInterceptor func(ctx context.Context) context.Context
+
 // config must be valid (use its Validate function).
-func NewServer(config ServerConfig, handler Handler, log Logger) *Server {
+func NewServer(config ServerConfig, handler Handler, log Logger, ctxInterceptor HandlerContextInterceptor) *Server {
 
 	if err := config.Validate(); err != nil {
 		panic(err)
@@ -99,7 +101,11 @@ func NewServer(config ServerConfig, handler Handler, log Logger) *Server {
 	dataServerClientIdentitySetter := func(ctx context.Context, wire net.Conn) (context.Context, net.Conn) {
 		authConn := wire.(*transport.AuthConn) // we set the listener cascase up above, we know this is true
 		ci := authConn.ClientIdentity()
-		return context.WithValue(ctx, endpoint.ClientIdentityKey, ci), wire
+		ctx = context.WithValue(ctx, endpoint.ClientIdentityKey, ci)
+		if ctxInterceptor != nil {
+			ctx = ctxInterceptor(ctx) // SHADOWING
+		}
+		return ctx, wire
 	}
 	dataServer := dataconn.NewServer(dataServerClientIdentitySetter, dataLog, handler)
 	dataServerServe := func(ctx context.Context, dataListener transport.AuthenticatedListener, errOut chan<- error) {
