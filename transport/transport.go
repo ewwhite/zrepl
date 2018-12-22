@@ -28,18 +28,16 @@ func (c *AuthConn) ClientIdentity() string {
 
 // like net.Listener, but with an AuthenticatedConn instead of net.Conn
 type AuthenticatedListener interface {
-	Addr() (net.Addr)
+	Addr() net.Addr
 	Accept(ctx context.Context) (*AuthConn, error)
 	Close() error
 }
 
-type AuthenticatedListenerFactory func() (AuthenticatedListener,error)
-
+type AuthenticatedListenerFactory func() (AuthenticatedListener, error)
 
 type Connecter interface {
 	Connect(ctx context.Context) (net.Conn, error)
 }
-
 
 // A client identity must be a single component in a ZFS filesystem path
 func ValidateClientIdentity(in string) (err error) {
@@ -52,7 +50,6 @@ func ValidateClientIdentity(in string) (err error) {
 	}
 	return nil
 }
-
 
 type contextKey int
 
