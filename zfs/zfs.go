@@ -319,7 +319,7 @@ type sendStreamCopier struct {
 }
 
 type readErrRecorder struct {
-	*util.IOCommand
+	io.ReadCloser
 	readErr error
 }
 
@@ -340,12 +340,12 @@ func (e sendStreamCopierError) IsReadError() bool { return e.isReadErr }
 func (e sendStreamCopierError) IsWriteError() bool { return !e.isReadErr }
 
 func (r *readErrRecorder) Read(p []byte) (n int, err error) {
-	n, err = r.IOCommand.Read(p)	
+	n, err = r.ReadCloser.Read(p)
 	r.readErr = err
 	return n, err
 }
 
-func newSendStreamCopier(stream *util.IOCommand) *sendStreamCopier {
+func newSendStreamCopier(stream io.ReadCloser) *sendStreamCopier {
 	return &sendStreamCopier{recorder: readErrRecorder{stream, nil}}
 }
 
@@ -362,7 +362,7 @@ func (c sendStreamCopier) WriteStreamTo(w io.Writer) StreamCopierError {
 }
 
 func (c sendStreamCopier) Close() error {
-	return c.recorder.IOCommand.Close()
+	return c.recorder.ReadCloser.Close()
 }
 
 
