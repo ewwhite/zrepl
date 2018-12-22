@@ -155,15 +155,23 @@ func (c *Conn) SendStream(ctx context.Context, src zfs.StreamCopier) error {
 		return fmt.Errorf("dataconn send stream: connection is in unknown state")
 	}
 
-	r, w := io.Pipe()
+	var r io.Reader
+	var w *io.PipeWriter
 	streamCopierErrChan := make(chan zfs.StreamCopierError)
-	go func() {
-		streamCopierErrChan <- src.WriteStreamTo(w)
-	}()
+	if reader, ok := src.(io.Reader); ok {
+		r = reader
+		close(streamCopierErrChan)
+	} else {
+		r, w = io.Pipe()
+		go func() {
+			streamCopierErrChan <- src.WriteStreamTo(w)
+		}()
+	}
+
 	writeStreamErrChan := make(chan error)
 	go func() {
 		writeStreamErr := stream.WriteStream(ctx, c.hc, r, Stream)
-		if writeStreamErr != nil {
+		if writeStreamErr != nil && w != nil {
 			w.CloseWithError(writeStreamErr)
 		}
 		writeStreamErrChan <- writeStreamErr

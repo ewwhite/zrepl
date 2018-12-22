@@ -361,6 +361,10 @@ func (c sendStreamCopier) WriteStreamTo(w io.Writer) StreamCopierError {
 	return nil
 }
 
+func (c sendStreamCopier) Read(p []byte) (n int, err error) {
+	return c.recorder.Read(p)
+}
+
 func (c sendStreamCopier) Close() error {
 	return c.recorder.ReadCloser.Close()
 }
