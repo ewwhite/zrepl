@@ -68,7 +68,7 @@ func WriteStream(ctx context.Context, c *heartbeatconn.Conn, stream io.Reader, s
 	assertPublicFrameType(stype)
 
 	const FramePayloadShift = 19
-	bufpool := base2bufpool.New(1 << FramePayloadShift, 1 << FramePayloadShift, base2bufpool.Panic)
+	bufpool := base2bufpool.New(FramePayloadShift, FramePayloadShift, base2bufpool.Panic)
 	type read struct {
 		buf base2bufpool.Buffer
 		err error
