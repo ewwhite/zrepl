@@ -18,7 +18,7 @@ func (c Conn) Read(p []byte) (n int, err error) {
 	n = 0
 	err = nil
 restart:
-	if err := c.SetDeadline(time.Now().Add(c.idleTimeout)); err != nil {
+	if err := c.SetReadDeadline(time.Now().Add(c.idleTimeout)); err != nil {
 		return n, err
 	}
 	var nCurRead int
@@ -34,7 +34,7 @@ restart:
 func (c Conn) Write(p []byte) (n int, err error) {
 	n = 0
 restart:
-	if err := c.SetDeadline(time.Now().Add(c.idleTimeout)); err != nil {
+	if err := c.SetWriteDeadline(time.Now().Add(c.idleTimeout)); err != nil {
 		return n, err
 	}
 	var nCurWrite int
