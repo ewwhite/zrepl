@@ -58,6 +58,9 @@ func assertPublicFrameType(frameType uint32) {
 	}
 }
 
+const FramePayloadShift = 19
+var bufpool = base2bufpool.New(FramePayloadShift, FramePayloadShift, base2bufpool.Panic)
+
 // if sendStream returns an error, that error will be sent as a trailer to the client
 // ok will return nil, though.
 func WriteStream(ctx context.Context, c *heartbeatconn.Conn, stream io.Reader, stype uint32) error {
@@ -67,8 +70,6 @@ func WriteStream(ctx context.Context, c *heartbeatconn.Conn, stream io.Reader, s
 	}
 	assertPublicFrameType(stype)
 
-	const FramePayloadShift = 19
-	bufpool := base2bufpool.New(FramePayloadShift, FramePayloadShift, base2bufpool.Panic)
 	type read struct {
 		buf base2bufpool.Buffer
 		err error
