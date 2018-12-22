@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"syscall"
 	"time"
+	"golang.org/x/sys/unix"
 )
 
 // An IOCommand exposes a forked process's std(in|out|err) through the io.ReadWriteCloser interface.
@@ -58,9 +59,18 @@ func NewIOCommand(ctx context.Context, command string, args []string, stderrBufS
 	ctx, c.kill = context.WithCancel(ctx)
 	c.Cmd = exec.CommandContext(ctx, command, args...)
 
-	if c.Stdout, err = c.Cmd.StdoutPipe(); err != nil {
-		return
+	stdoutReader, stdoutWriter, err := os.Pipe()
+	if err != nil {
+		return nil, err
 	}
+	pipeCap, err := unix.FcntlInt(stdoutWriter.Fd(), unix.F_SETPIPE_SZ, 1<<25)
+	fmt.Fprintf(os.Stderr, "pipe capacity set to %v\n", pipeCap)
+	if pipeCap == -1 || err != nil {
+		panic(fmt.Sprintf("%v %v", pipeCap, err))
+	}
+
+	c.Stdout = stdoutReader
+	c.Cmd.Stdout = stdoutWriter
 
 	if c.Stdin, err = c.Cmd.StdinPipe(); err != nil {
 		return

@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 
+	"golang.org/x/sys/unix"
 	"context"
 	"github.com/problame/go-rwccmd"
 	"github.com/prometheus/client_golang/prometheus"
@@ -553,18 +555,27 @@ func ZFSRecv(ctx context.Context, fs string, streamCopier StreamCopier, addition
 	stdout := bytes.NewBuffer(make([]byte, 0, 1024))
 	cmd.Stdout = stdout
 
-	stdin, err := cmd.StdinPipe()
+	stdin, stdinWriter, err := os.Pipe()
 	if err != nil {
 		return err
 	}
-	
+	defer stdinWriter.Close()
+	defer stdin.Close()
+	pipeCap, err := unix.FcntlInt(stdin.Fd(), unix.F_SETPIPE_SZ, 1<<25)
+	fmt.Fprintf(os.Stderr, "pipe capacity set to %v\n", pipeCap)
+	if pipeCap == -1 || err != nil {
+		panic(fmt.Sprintf("%v %v", pipeCap, err))
+	}
+
+	cmd.Stdin = stdin
+
 	if err = cmd.Start(); err != nil {
 		return
 	}
 
 	copierErrChan := make(chan StreamCopierError)
 	go func() {
-		copierErrChan <- streamCopier.WriteStreamTo(stdin)
+		copierErrChan <- streamCopier.WriteStreamTo(stdinWriter)
 	}()
 	waitErrChan := make(chan *ZFSError)
 	go func() {
