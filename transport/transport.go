@@ -5,15 +5,30 @@ package transport
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"syscall"
 
 	"github.com/zrepl/zrepl/logger"
+	"github.com/zrepl/zrepl/rpc/dataconn/timeoutconn"
 	"github.com/zrepl/zrepl/zfs"
 )
 
 type AuthConn struct {
 	net.Conn
 	clientIdentity string
+}
+
+var _ timeoutconn.SyscallConner = AuthConn{}
+
+var errAuthConnNoSyscallConn = fmt.Errorf("underlying conn is not a SyscallConn")
+
+func (a AuthConn) SyscallConn() (rawConn syscall.RawConn, err error) {
+	scc, ok := a.Conn.(timeoutconn.SyscallConner)
+	if !ok {
+		return nil, errAuthConnNoSyscallConn
+	}
+	return scc.SyscallConn()
 }
 
 func NewAuthConn(conn net.Conn, clientIdentity string) *AuthConn {

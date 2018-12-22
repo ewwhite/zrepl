@@ -58,7 +58,7 @@ func assertPublicFrameType(frameType uint32) {
 
 func Wrap(nc net.Conn, sendInterval, timeout time.Duration) *Conn {
 	c := &Conn{
-		fc:           frameconn.Wrap(timeoutconn.Wrap(nc, timeout)), // timeoutconn necessary?
+		fc:           frameconn.Wrap(timeoutconn.Wrap(nc, timeout)),
 		stopSend:     make(chan struct{}),
 		sendInterval: sendInterval,
 		timeout:      timeout,

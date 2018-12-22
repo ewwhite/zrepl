@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/zrepl/zrepl/rpc/dataconn/base2bufpool"
+	"github.com/zrepl/zrepl/rpc/dataconn/timeoutconn"
 )
 
 type FrameHeader struct {
@@ -38,14 +39,14 @@ func (f *FrameHeader) Unmarshal(buf []byte) {
 
 type Conn struct {
 	readMtx, writeMtx sync.Mutex
-	nc                net.Conn
+	nc                timeoutconn.Conn
 	ncBuf             *bufio.ReadWriter
 	readNextValid     bool
 	readNext          FrameHeader
 	bufPool           *base2bufpool.Pool // no need for sync around it
 }
 
-func Wrap(nc net.Conn) *Conn {
+func Wrap(nc timeoutconn.Conn) *Conn {
 	return &Conn{
 		nc: nc,
 		//		ncBuf: bufio.NewReadWriter(bufio.NewReaderSize(nc, 1<<23), bufio.NewWriterSize(nc, 1<<23)),
@@ -92,10 +93,12 @@ func (c *Conn) ReadFrame() (Frame, error) {
 	}
 
 	// read payload + next header
-	buffer := c.bufPool.Get(uint(c.readNext.PayloadLen + 8))
+	var nextHdrBuf [8]byte
+	buffer := c.bufPool.Get(uint(c.readNext.PayloadLen))
 	bufferBytes := buffer.Bytes()
+
 	endOfConnection := false
-	if n, err := io.ReadFull(c.nc, bufferBytes); err != nil {
+	if n, err := c.nc.ReadvFull([][]byte{bufferBytes, nextHdrBuf[:]}); err != nil {
 		endOfConnection = (n == 0 && err == io.EOF) ||
 			(err == io.ErrUnexpectedEOF && uint32(n) == c.readNext.PayloadLen)
 		if !endOfConnection {
@@ -112,7 +115,7 @@ func (c *Conn) ReadFrame() (Frame, error) {
 	}
 
 	if !endOfConnection {
-		c.readNext.Unmarshal(bufferBytes[c.readNext.PayloadLen:])
+		c.readNext.Unmarshal(nextHdrBuf[:])
 		c.readNextValid = true
 	} else {
 		c.readNextValid = false
@@ -133,9 +136,8 @@ func (c *Conn) writeFrame(payload []byte, frameType uint32) error {
 	var hdrBuf [8]byte
 	binary.BigEndian.PutUint32(hdrBuf[0:4], frameType)
 	binary.BigEndian.PutUint32(hdrBuf[4:8], uint32(len(payload)))
-
 	bufs := net.Buffers([][]byte{hdrBuf[:], payload})
-	if _, err := io.Copy(c.nc, &bufs); err != nil {
+	if _, err := c.nc.WritevFull(bufs); err != nil {
 		return err
 	}
 	return nil
