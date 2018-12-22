@@ -49,7 +49,7 @@ func Wrap(nc net.Conn) *Conn {
 	return &Conn{
 		nc: nc,
 		//		ncBuf: bufio.NewReadWriter(bufio.NewReaderSize(nc, 1<<23), bufio.NewWriterSize(nc, 1<<23)),
-		bufPool:       base2bufpool.New(15, 22),
+		bufPool:       base2bufpool.New(15, 22, base2bufpool.Allocate), // FIXME switch to Panic, but need to enforce the limits in recv for that. => need frameconn config
 		readNext:      FrameHeader{},
 		readNextValid: false,
 	}
