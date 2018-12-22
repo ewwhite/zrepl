@@ -375,6 +375,8 @@ func (c sendStreamCopier) Close() error {
 // (if from is "" a full ZFS send is done)
 func ZFSSend(ctx context.Context, fs string, from, to string, token string) (streamCopier StreamCopier, err error) {
 
+	// return newSendStreamCopier(devnoop.Get()), nil
+
 	args := make([]string, 0)
 	args = append(args, "send")
 
@@ -523,6 +525,8 @@ type StreamCopier interface {
 
 
 func ZFSRecv(ctx context.Context, fs string, streamCopier StreamCopier, additionalArgs ...string) (err error) {
+
+	// return streamCopier.WriteStreamTo(devnoop.Get())
 
 	if err := validateZFSFilesystem(fs); err != nil {
 		return err
