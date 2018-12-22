@@ -5,9 +5,10 @@ package transport
 import (
 	"context"
 	"errors"
+	"net"
+
 	"github.com/zrepl/zrepl/logger"
 	"github.com/zrepl/zrepl/zfs"
-	"net"
 )
 
 type AuthConn struct {
