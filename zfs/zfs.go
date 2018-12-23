@@ -332,7 +332,7 @@ func (e sendStreamCopierError) Error() string {
 	if e.isReadErr {
 		return fmt.Sprintf("stream: read error: %s", e.err)
 	} else {
-		return fmt.Sprintf("stream: writer error: %S", e.err)
+		return fmt.Sprintf("stream: writer error: %s", e.err)
 	}
 }
 
