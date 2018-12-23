@@ -68,6 +68,7 @@ func (b Buffer) Free() {
 	}
 }
 
+//go:generate enumer -type NoFitBehavior
 type NoFitBehavior uint
 
 const (
@@ -111,7 +112,11 @@ func fittingShift(x uint) uint {
 
 func (p *Pool) handlePotentialNoFit(reqShift uint) (buf Buffer, didHandle bool) {
 	if reqShift == 0 {
-		return Buffer{[]byte{}, 0, nil}, true
+		if p.onNoFit&AllocateSmaller != 0 {
+			return Buffer{[]byte{}, 0, nil}, true
+		} else {
+			goto doPanic
+		}
 	}
 	if reqShift < p.minShift {
 		if p.onNoFit&AllocateSmaller != 0 {
