@@ -17,8 +17,5 @@ func TestIsPublicFrameType(t *testing.T) {
 	assert.True(t, IsPublicFrameType(0))
 	assert.True(t, IsPublicFrameType(1))
 	assert.True(t, IsPublicFrameType(255))
-
-
-	assert.False(t, IsPublicFrameType(heartbeat))
 }
 
