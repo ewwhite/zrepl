@@ -5,10 +5,11 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	frameconn "github.com/zrepl/zrepl/rpc/dataconn/frameconn2"
 )
 
 func TestFrameTypes(t *testing.T) {
-	assert.False(t, frameconn.IsPublicFrameType(heartbeat))
+	assert.True(t, frameconn.IsPublicFrameType(heartbeat))
 }
 
 func TestNegativeTimer(t *testing.T) {
