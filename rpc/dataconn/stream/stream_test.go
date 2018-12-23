@@ -3,13 +3,16 @@ package stream
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zrepl/zrepl/logger"
 	"github.com/zrepl/zrepl/rpc/dataconn/frameconn2"
+	"github.com/zrepl/zrepl/rpc/dataconn/heartbeatconn"
 	"github.com/zrepl/zrepl/util/socketpair"
 )
 
@@ -28,8 +31,9 @@ func TestStreamer(t *testing.T) {
 	anc, bnc, err := socketpair.SocketPair()
 	require.NoError(t, err)
 
-	a := frameconn.Wrap(anc)
-	b := frameconn.Wrap(bnc)
+	hto := 1 * time.Hour
+	a := heartbeatconn.Wrap(anc, hto, hto)
+	b := heartbeatconn.Wrap(bnc, hto, hto)
 
 	log := logger.NewStderrDebugLogger()
 	ctx := WithLogger(context.Background(), log)
@@ -51,9 +55,9 @@ func TestStreamer(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		var buf bytes.Buffer
-		err := ReadStream(ctx, b, &buf, stype)
-		log.Debug("ReadStream returned")
-		assert.NoError(t, err)
+		err := ReadStream(b, &buf, stype)
+		log.WithField("errType", fmt.Sprintf("%T %v", err, err)).Debug("ReadStream returned")
+		assert.Nil(t, err)
 		expected := bytes.Repeat([]byte{1, 2}, 1<<25)
 		assert.True(t, bytes.Equal(expected, buf.Bytes()))
 		b.Close()
