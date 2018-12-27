@@ -1,18 +1,20 @@
 package stream
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"unicode/utf8"
 
-	"github.com/zrepl/zrepl/zfs"
 	"github.com/zrepl/zrepl/logger"
 	"github.com/zrepl/zrepl/rpc/dataconn/base2bufpool"
 	frameconn "github.com/zrepl/zrepl/rpc/dataconn/frameconn2"
 	"github.com/zrepl/zrepl/rpc/dataconn/heartbeatconn"
+	"github.com/zrepl/zrepl/zfs"
 )
 
 type Logger = logger.Logger
@@ -59,6 +61,7 @@ func assertPublicFrameType(frameType uint32) {
 }
 
 const FramePayloadShift = 19
+
 var bufpool = base2bufpool.New(FramePayloadShift, FramePayloadShift, base2bufpool.Panic)
 
 // if sendStream returns an error, that error will be sent as a trailer to the client
@@ -73,7 +76,8 @@ func WriteStream(ctx context.Context, c *heartbeatconn.Conn, stream io.Reader, s
 }
 
 func writeStream(ctx context.Context, c *heartbeatconn.Conn, stream io.Reader, stype uint32) (errStream, errConn error) {
-
+	fmt.Fprintf(os.Stderr, "writeStream: enter\n")
+	defer fmt.Fprintf(os.Stderr, "writeStream: return\n")
 	type read struct {
 		buf base2bufpool.Buffer
 		err error
@@ -83,7 +87,9 @@ func writeStream(ctx context.Context, c *heartbeatconn.Conn, stream io.Reader, s
 		for {
 			buffer := bufpool.Get(1 << FramePayloadShift)
 			bufferBytes := buffer.Bytes()
+			//			fmt.Fprintf(os.Stderr, "writeStream: read full begin\n");
 			n, err := io.ReadFull(stream, bufferBytes)
+			//			fmt.Fprintf(os.Stderr, "writeStream: read full end %v %v\n", err, n);
 			buffer.Shrink(uint(n))
 			if err == io.ErrUnexpectedEOF {
 				err = io.EOF
@@ -97,6 +103,7 @@ func writeStream(ctx context.Context, c *heartbeatconn.Conn, stream io.Reader, s
 	}()
 
 	for read := range reads {
+		fmt.Fprintf(os.Stderr, "writeStream.range read %v\n", read.err)
 		buf := read.buf
 		if read.err != nil && read.err != io.EOF {
 			buf.Free()
@@ -201,8 +208,9 @@ func ReadStream(c *heartbeatconn.Conn, receiver io.Writer, stype uint32) *ReadSt
 		for {
 			var r read
 			r.f, r.err = c.ReadFrame()
+			fmt.Fprintf(os.Stderr, "stream.ReadStream: frame read %v %v\n", r.err, r.f)
 			reads <- r
-			if r.err != nil || r.f.Header.Type == SourceEOF || r.f.Header.Type == SourceErr {
+			if r.err != nil || r.f.Header.Type == SourceEOF {
 				close(reads)
 				return
 			}
@@ -232,14 +240,27 @@ func ReadStream(c *heartbeatconn.Conn, receiver io.Writer, stype uint32) *ReadSt
 	}
 
 	if f.Header.Type == SourceEOF {
+		fmt.Fprintf(os.Stderr, "SourceEOF reached\n")
 		return nil
 	}
 
 	if f.Header.Type == SourceErr {
-		if !utf8.Valid(f.Buffer.Bytes()) {
+		var errBuf bytes.Buffer
+		if n, err := errBuf.Write(f.Buffer.Bytes()); n != len(f.Buffer.Bytes()) || err != nil {
+			panic(fmt.Sprintf("unexpected bytes.Buffer write error: %v %v", n, err))
+		}
+		// recursion ftw! we won't enter this if stmt because stype == SourceErr in the following call
+		rserr := ReadStream(c, &errBuf, SourceErr)
+		if rserr != nil && rserr.Kind == ReadStreamErrorKindWrite {
+			panic(fmt.Sprintf("unexpected bytes.Buffer write error: %s", rserr))
+		} else if rserr != nil {
+			fmt.Fprintf(os.Stderr, "rserr != nil && != ReadStreamErrorKindWrite: %v %v\n", rserr.Kind, rserr.Err)
+			return rserr
+		}
+		if !utf8.Valid(errBuf.Bytes()) {
 			return &ReadStreamError{ReadStreamErrorKindSourceErrEncoding, fmt.Errorf("source error, but not encoded as UTF-8")}
 		}
-		return &ReadStreamError{ReadStreamErrorKindSource, fmt.Errorf("%s", string(f.Buffer.Bytes()))}
+		return &ReadStreamError{ReadStreamErrorKindSource, fmt.Errorf("%s", errBuf.String())}
 	}
 
 	return &ReadStreamError{ReadStreamErrorKindUnexpectedFrameType, fmt.Errorf("unexpected frame type %v (expected %v)", f.Header.Type, stype)}
