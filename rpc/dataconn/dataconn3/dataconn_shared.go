@@ -129,11 +129,16 @@ func (c *Conn) WriteStreamTo(w io.Writer) zfs.StreamCopierError {
 		panic("Conn not set to allow WriteStreamTo, this is a safeguard to prevent multiple uses of WriteStreamTo by a handler")
 	}
 	c.allowWriteStreamTo = false // reset it
-	err := stream.ReadStream(c.hc, w, Stream)
 	if !c.readClean {
 		return writeStreamToErrorUnknownState{}
 	}
+	var err *stream.ReadStreamError = stream.ReadStream(c.hc, w, Stream)
 	c.readClean = isConnCleanAfterRead(err)
+
+	// https://golang.org/doc/faq#nil_error
+	if err == nil {
+		return nil
+	}
 	return err
 }
 
