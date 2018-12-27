@@ -37,7 +37,7 @@ func getLog(ctx context.Context) Logger {
 
 // The following frameconn.Frame.Type are reserved for Streamer.
 const (
-	SourceEOF uint32 = 1 << 16
+	SourceEOF uint32 = 1 << (16 + iota)
 	SourceErr
 	// max 16
 )
