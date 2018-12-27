@@ -37,27 +37,21 @@ func getLog(ctx context.Context) Logger {
 	return log
 }
 
-// The following frameconn.Frame.Type are reserved for Streamer.
+// Frame types used by this package.
+// 4 MSBs are reserved for frameconn, next 4 MSB for heartbeatconn, next 4 MSB for us.
 const (
-	SourceEOF uint32 = 1 << (16 + iota)
-	SourceErr
+	StreamErrTrailer uint32 = 1 << (16 + iota)
+	End
 	// max 16
 )
 
 // NOTE: make sure to add a tests for each frame type that checks
-//       whether it is frameconn.IsPublicFrameType()
+//       whether it is heartbeatconn.IsPublicFrameType()
 
 // Check whether the given frame type is allowed to be used by
 // consumers of this package. Intended for use in unit tests.
 func IsPublicFrameType(ft uint32) bool {
-	// 4 MSBs are reserved for frameconn, next 4 MSB for heartbeatconn, next 4 MSB for us.
-	return frameconn.IsPublicFrameType(ft) && ((0xf<<16)&ft == 0)
-}
-
-func assertPublicFrameType(frameType uint32) {
-	if !IsPublicFrameType(frameType) {
-		panic(fmt.Sprintf("stream: frame type %v cannot be used by consumers of this package", frameType))
-	}
+	return frameconn.IsPublicFrameType(ft) && heartbeatconn.IsPublicFrameType(ft) && ((0xf<<16)&ft == 0)
 }
 
 const FramePayloadShift = 19
@@ -66,18 +60,19 @@ var bufpool = base2bufpool.New(FramePayloadShift, FramePayloadShift, base2bufpoo
 
 // if sendStream returns an error, that error will be sent as a trailer to the client
 // ok will return nil, though.
-func WriteStream(ctx context.Context, c *heartbeatconn.Conn, stream io.Reader, stype uint32) (errStream, errConn error) {
-
+func writeStream(ctx context.Context, c *heartbeatconn.Conn, stream io.Reader, stype uint32) (errStream, errConn error) {
+	fmt.Fprintf(os.Stderr, "writeStream: enter %v\n", stype)
+	defer fmt.Fprintf(os.Stderr, "writeStream: return\n")
 	if stype == 0 {
 		panic("stype must be non-zero")
 	}
-	assertPublicFrameType(stype)
-	return writeStream(ctx, c, stream, stype)
+	if !IsPublicFrameType(stype) {
+		panic(fmt.Sprintf("stype %v is not public", stype))
+	}
+	return doWriteStream(ctx, c, stream, stype)
 }
 
-func writeStream(ctx context.Context, c *heartbeatconn.Conn, stream io.Reader, stype uint32) (errStream, errConn error) {
-	fmt.Fprintf(os.Stderr, "writeStream: enter\n")
-	defer fmt.Fprintf(os.Stderr, "writeStream: return\n")
+func doWriteStream(ctx context.Context, c *heartbeatconn.Conn, stream io.Reader, stype uint32) (errStream, errConn error) {
 	type read struct {
 		buf base2bufpool.Buffer
 		err error
@@ -103,12 +98,11 @@ func writeStream(ctx context.Context, c *heartbeatconn.Conn, stream io.Reader, s
 	}()
 
 	for read := range reads {
-		fmt.Fprintf(os.Stderr, "writeStream.range read %v\n", read.err)
 		buf := read.buf
 		if read.err != nil && read.err != io.EOF {
 			buf.Free()
 			errReader := strings.NewReader(read.err.Error())
-			errReadErrReader, errConnWrite := writeStream(ctx, c, errReader, SourceErr)
+			errReadErrReader, errConnWrite := doWriteStream(ctx, c, errReader, StreamErrTrailer)
 			if errReadErrReader != nil {
 				panic(errReadErrReader) // in-memory, cannot happen
 			}
@@ -121,7 +115,7 @@ func writeStream(ctx context.Context, c *heartbeatconn.Conn, stream io.Reader, s
 			return nil, writeErr
 		}
 		if read.err == io.EOF {
-			if err := c.WriteFrame([]byte{}, SourceEOF); err != nil {
+			if err := c.WriteFrame([]byte{}, End); err != nil {
 				return nil, err
 			}
 			break
@@ -137,7 +131,7 @@ const (
 	ReadStreamErrorKindConn ReadStreamErrorKind = 1 + iota
 	ReadStreamErrorKindWrite
 	ReadStreamErrorKindSource
-	ReadStreamErrorKindSourceErrEncoding
+	ReadStreamErrorKindStreamErrTrailerEncoding
 	ReadStreamErrorKindUnexpectedFrameType
 )
 
@@ -155,7 +149,7 @@ func (e *ReadStreamError) Error() string {
 		kindStr = " write error: "
 	case ReadStreamErrorKindSource:
 		kindStr = " source error: "
-	case ReadStreamErrorKindSourceErrEncoding:
+	case ReadStreamErrorKindStreamErrTrailerEncoding:
 		kindStr = " source implementation error: "
 	case ReadStreamErrorKindUnexpectedFrameType:
 		kindStr = " protocol error: "
@@ -196,22 +190,19 @@ func (e ReadStreamError) IsWriteError() bool {
 	return e.Kind == ReadStreamErrorKindWrite
 }
 
-// ReadStream will close c if an error reading  from c or writing to receiver occurs
-func ReadStream(c *heartbeatconn.Conn, receiver io.Writer, stype uint32) *ReadStreamError {
+type readStreamResult struct {
+	f   frameconn.Frame
+	err error
+}
 
-	type read struct {
-		f   frameconn.Frame
-		err error
-	}
-	reads := make(chan read, 5)
-	go func() {
+// ReadStream will close c if an error reading  from c or writing to receiver occurs
+func readStream(reads chan readStreamResult, c *heartbeatconn.Conn, receiver io.Writer, stype uint32) *ReadStreamError {
+	go func() { // FIXME only one per conn, move this out of here
 		for {
-			var r read
+			var r readStreamResult
 			r.f, r.err = c.ReadFrame()
-			fmt.Fprintf(os.Stderr, "stream.ReadStream: frame read %v %v\n", r.err, r.f)
 			reads <- r
-			if r.err != nil || r.f.Header.Type == SourceEOF {
-				close(reads)
+			if r.err != nil || r.f.Header.Type == End {
 				return
 			}
 		}
@@ -219,6 +210,7 @@ func ReadStream(c *heartbeatconn.Conn, receiver io.Writer, stype uint32) *ReadSt
 
 	var f frameconn.Frame
 	for read := range reads {
+		fmt.Fprintf(os.Stderr, "readStream.didRead %v %v\n", read.err, read.f)
 		f = read.f
 		if read.err != nil {
 			return &ReadStreamError{ReadStreamErrorKindConn, read.err}
@@ -239,18 +231,19 @@ func ReadStream(c *heartbeatconn.Conn, receiver io.Writer, stype uint32) *ReadSt
 		f.Buffer.Free()
 	}
 
-	if f.Header.Type == SourceEOF {
-		fmt.Fprintf(os.Stderr, "SourceEOF reached\n")
+	if f.Header.Type == End {
+		fmt.Fprintf(os.Stderr, "End reached\n")
 		return nil
 	}
 
-	if f.Header.Type == SourceErr {
+	if f.Header.Type == StreamErrTrailer {
+		fmt.Fprintf(os.Stderr, "begin of StreamErrTrailer\n")
 		var errBuf bytes.Buffer
 		if n, err := errBuf.Write(f.Buffer.Bytes()); n != len(f.Buffer.Bytes()) || err != nil {
 			panic(fmt.Sprintf("unexpected bytes.Buffer write error: %v %v", n, err))
 		}
-		// recursion ftw! we won't enter this if stmt because stype == SourceErr in the following call
-		rserr := ReadStream(c, &errBuf, SourceErr)
+		// recursion ftw! we won't enter this if stmt because stype == StreamErrTrailer in the following call
+		rserr := readStream(reads, c, &errBuf, StreamErrTrailer)
 		if rserr != nil && rserr.Kind == ReadStreamErrorKindWrite {
 			panic(fmt.Sprintf("unexpected bytes.Buffer write error: %s", rserr))
 		} else if rserr != nil {
@@ -258,7 +251,7 @@ func ReadStream(c *heartbeatconn.Conn, receiver io.Writer, stype uint32) *ReadSt
 			return rserr
 		}
 		if !utf8.Valid(errBuf.Bytes()) {
-			return &ReadStreamError{ReadStreamErrorKindSourceErrEncoding, fmt.Errorf("source error, but not encoded as UTF-8")}
+			return &ReadStreamError{ReadStreamErrorKindStreamErrTrailerEncoding, fmt.Errorf("source error, but not encoded as UTF-8")}
 		}
 		return &ReadStreamError{ReadStreamErrorKindSource, fmt.Errorf("%s", errBuf.String())}
 	}

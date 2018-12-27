@@ -10,6 +10,7 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/zrepl/zrepl/logger"
 	"github.com/zrepl/zrepl/replication/pdu"
+	"github.com/zrepl/zrepl/rpc/dataconn/stream"
 	"github.com/zrepl/zrepl/zfs"
 )
 
@@ -93,7 +94,7 @@ func (s *Server) serveConn(nc net.Conn) {
 		ctx, nc = s.wi(ctx, nc)
 	}
 
-	c:= wrap(nc, HeartbeatInterval, HeartbeatPeerTimeout)
+	c := stream.Wrap(nc, HeartbeatInterval, HeartbeatPeerTimeout)
 	defer func() {
 		s.log.Debug("close client connection")
 		if err := c.Close(); err != nil {
@@ -133,8 +134,7 @@ func (s *Server) serveConn(nc net.Conn) {
 			s.log.WithError(err).Error("cannot unmarshal receive request")
 			return
 		}
-		c.setAllowWriteStreamTo()
-		res, handlerErr = s.h.Receive(ctx, &req, c) // SHADOWING
+		res, handlerErr = s.h.Receive(ctx, &req, &streamCopier{Conn: c}) // SHADOWING
 	default:
 		s.log.WithField("endpoint", endpoint).Error("unknown endpoint")
 		handlerErr = fmt.Errorf("requested endpoint does not exist")
@@ -178,7 +178,7 @@ func (s *Server) serveConn(nc net.Conn) {
 	}
 
 	if sendStream != nil {
-		err := c.SendStream(ctx, sendStream)
+		err := c.SendStream(ctx, sendStream, ZFSStream)
 		if err != nil {
 			s.log.WithError(err).Error("cannot write send stream")
 		}

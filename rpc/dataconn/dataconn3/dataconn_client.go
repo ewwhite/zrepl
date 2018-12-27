@@ -8,6 +8,7 @@ import (
 
 	"github.com/golang/protobuf/proto"
 	"github.com/zrepl/zrepl/replication/pdu"
+	"github.com/zrepl/zrepl/rpc/dataconn/stream"
 	"github.com/zrepl/zrepl/transport"
 	"github.com/zrepl/zrepl/zfs"
 )
@@ -32,7 +33,7 @@ func NewClient(connecter transport.Connecter, log Logger) *Client {
 	}
 }
 
-func (c *Client) send(ctx context.Context, conn *Conn, endpoint string, req proto.Message, streamCopier zfs.StreamCopier) error {
+func (c *Client) send(ctx context.Context, conn *stream.Conn, endpoint string, req proto.Message, streamCopier zfs.StreamCopier) error {
 
 	var buf bytes.Buffer
 	_, memErr := buf.WriteString(endpoint)
@@ -53,13 +54,13 @@ func (c *Client) send(ctx context.Context, conn *Conn, endpoint string, req prot
 	}
 
 	if streamCopier != nil {
-		return conn.SendStream(ctx, streamCopier)
+		return conn.SendStream(ctx, streamCopier, ZFSStream)
 	} else {
 		return nil
 	}
 }
 
-func (c *Client) recv(ctx context.Context, conn *Conn, res proto.Message) error {
+func (c *Client) recv(ctx context.Context, conn *stream.Conn, res proto.Message) error {
 
 	headerBuf, err := conn.ReadStreamedMessage(ctx, 1<<15, ResHeader)
 	if err != nil {
@@ -81,16 +82,16 @@ func (c *Client) recv(ctx context.Context, conn *Conn, res proto.Message) error 
 	return nil
 }
 
-func (c *Client) getWire(ctx context.Context) (*Conn, error) {
+func (c *Client) getWire(ctx context.Context) (*stream.Conn, error) {
 	nc, err := c.cn.Connect(ctx)
 	if err != nil {
 		return nil, err
 	}
-	conn := wrap(nc, HeartbeatInterval, HeartbeatPeerTimeout)
+	conn := stream.Wrap(nc, HeartbeatInterval, HeartbeatPeerTimeout)
 	return conn, nil
 }
 
-func (c *Client) putWire(conn *Conn) {
+func (c *Client) putWire(conn *stream.Conn) {
 	if err := conn.Close(); err != nil {
 		c.log.WithError(err).Error("error closing connection")
 	}
@@ -120,7 +121,7 @@ func (c *Client) ReqSend(ctx context.Context, req *pdu.SendReq) (*pdu.SendRes, z
 	var copier zfs.StreamCopier = nil
 	if !req.DryRun {
 		putWireOnReturn = false
-		copier = conn
+		copier = &streamCopier{Conn: conn}
 	}
 
 	return &res, copier, nil
