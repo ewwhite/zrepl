@@ -162,13 +162,20 @@ func (c *Client) ReqRecv(ctx context.Context, req *pdu.ReceiveReq, streamCopier 
 
 	var res recvRes
 	var sendErr error
+	var cause error // one of the above
 	didTryClose := false
 	for i := 0; i < 2; i++ {
 		select {
 		case res = <-recvErrChan:
 				c.log.WithField("errType", fmt.Sprintf("%T", res.err)).WithError(res.err).Debug("recv goroutine returned")
+				if res.err != nil && cause == nil {
+					cause = res.err
+				}
 		case sendErr = <- sendErrChan:
 				c.log.WithField("errType", fmt.Sprintf("%T", sendErr)).WithError(sendErr).Debug("send goroutine returned")
+				if sendErr != nil && cause == nil {
+					cause = sendErr
+				}
 		}
 		if !didTryClose && (res.err != nil || sendErr != nil) {
 			didTryClose = true
@@ -184,11 +191,5 @@ func (c *Client) ReqRecv(ctx context.Context, req *pdu.ReceiveReq, streamCopier 
 		c.putWire(conn)	
 	}
 
-	// determine which error is more relevant (i.e. not caused by Close)
-	relevantErr := res.err
-	if relevantErr == nil {
-		relevantErr = sendErr
-	}
-
-	return res.res, relevantErr
+	return res.res, cause
 }

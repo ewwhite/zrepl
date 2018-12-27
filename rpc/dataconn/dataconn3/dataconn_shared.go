@@ -218,7 +218,17 @@ func (c *Conn) Close() error {
 		c.hc.WriteFrame([]byte{}, Bye)
 	}
 	if c.readClean {
+		fmt.Fprintf(os.Stderr, "wait for remote bye\n")
 		c.hc.ReadFrame()
+	} else {
+		// TODO
+		// The common case will be that the receiving side had some zfs error
+		// and the receiving side's kernel recv buffer is full.
+		// Now, if we close the conn immediatley, after sending above
+		// ByeFrame (c.writeClean), the sender's kernel will issue a retransmit
+		// immediatley because it assumes some network error made the receiver
+		// fail to ACK.
+		time.Sleep(200*time.Millisecond)
 	}
 
 	c.writeClean = false
