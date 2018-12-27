@@ -143,9 +143,12 @@ func (c *Conn) WriteStreamedMessage(ctx context.Context, buf io.Reader, frameTyp
 	if !c.writeClean {
 		return fmt.Errorf("dataconn write message: connection is in unknown state")
 	}
-	err := stream.WriteStream(ctx, c.hc, buf, frameType)
-	c.writeClean = isConnCleanAfterWrite(err)
-	return err
+	errBuf, errConn := stream.WriteStream(ctx, c.hc, buf, frameType)
+	if errBuf != nil {
+		panic(errBuf)
+	}
+	c.writeClean = isConnCleanAfterWrite(errConn)
+	return errConn
 }
 
 func (c *Conn) SendStream(ctx context.Context, src zfs.StreamCopier) error {
@@ -168,22 +171,32 @@ func (c *Conn) SendStream(ctx context.Context, src zfs.StreamCopier) error {
 		}()
 	}
 
-	writeStreamErrChan := make(chan error)
+	type writeStreamRes struct {
+		errStream, errConn error
+	}
+	writeStreamErrChan := make(chan writeStreamRes)
 	go func() {
-		writeStreamErr := stream.WriteStream(ctx, c.hc, r, Stream)
-		if writeStreamErr != nil && w != nil {
-			w.CloseWithError(writeStreamErr)
+		var res writeStreamRes
+		res.errStream, res.errConn = stream.WriteStream(ctx, c.hc, r, Stream)
+		if res.errStream != nil && w != nil {
+			w.CloseWithError(res.errStream)
 		}
-		writeStreamErrChan <- writeStreamErr
+		writeStreamErrChan <- res
 	}()
 
-	writeStreamErr := <-writeStreamErrChan
+	writeRes := <-writeStreamErrChan
 	streamCopierErr := <-streamCopierErrChan
-	c.writeClean = isConnCleanAfterWrite(writeStreamErr)
+	c.writeClean = isConnCleanAfterWrite(writeRes.errConn) // TODO correct?
 	if streamCopierErr != nil && streamCopierErr.IsReadError() {
 		return streamCopierErr // something on our side is bad
 	} else {
-		return writeStreamErr // most likely, something wrt connection is bad
+		if writeRes.errStream != nil {
+			return writeRes.errStream
+		} else if writeRes.errConn != nil {
+			return writeRes.errConn
+		}
+		// TODO combined error?
+		return nil
 	}
 }
 

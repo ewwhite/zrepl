@@ -63,12 +63,16 @@ var bufpool = base2bufpool.New(FramePayloadShift, FramePayloadShift, base2bufpoo
 
 // if sendStream returns an error, that error will be sent as a trailer to the client
 // ok will return nil, though.
-func WriteStream(ctx context.Context, c *heartbeatconn.Conn, stream io.Reader, stype uint32) error {
+func WriteStream(ctx context.Context, c *heartbeatconn.Conn, stream io.Reader, stype uint32) (errStream, errConn error) {
 
 	if stype == 0 {
 		panic("stype must be non-zero")
 	}
 	assertPublicFrameType(stype)
+	return writeStream(ctx, c, stream, stype)
+}
+
+func writeStream(ctx context.Context, c *heartbeatconn.Conn, stream io.Reader, stype uint32) (errStream, errConn error) {
 
 	type read struct {
 		buf base2bufpool.Buffer
@@ -97,27 +101,27 @@ func WriteStream(ctx context.Context, c *heartbeatconn.Conn, stream io.Reader, s
 		if read.err != nil && read.err != io.EOF {
 			buf.Free()
 			errReader := strings.NewReader(read.err.Error())
-			err := WriteStream(ctx, c, errReader, SourceErr)
-			if err != nil {
-				return err
+			errReadErrReader, errConnWrite := writeStream(ctx, c, errReader, SourceErr)
+			if errReadErrReader != nil {
+				panic(errReadErrReader) // in-memory, cannot happen
 			}
-			return nil
+			return read.err, errConnWrite
 		}
 		// next line is the hot path...
 		writeErr := c.WriteFrame(buf.Bytes(), stype)
 		buf.Free()
 		if writeErr != nil {
-			return writeErr
+			return nil, writeErr
 		}
 		if read.err == io.EOF {
 			if err := c.WriteFrame([]byte{}, SourceEOF); err != nil {
-				return err
+				return nil, err
 			}
 			break
 		}
 	}
 
-	return nil
+	return nil, nil
 }
 
 type ReadStreamErrorKind int
