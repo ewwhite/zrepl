@@ -143,7 +143,7 @@ func (s *Server) serveConn(nc net.Conn) {
 
 	s.log.WithField("endpoint", endpoint).WithField("errType", fmt.Sprintf("%T", handlerErr)).Debug("handler returned")
 
-	// prepare protobuf ahead to return the protobuf error in the header
+	// prepare protobuf now to return the protobuf error in the header
 	// if marshaling fails. We consider failed marshaling a handler error
 	var protobuf *bytes.Buffer
 	if handlerErr == nil {
